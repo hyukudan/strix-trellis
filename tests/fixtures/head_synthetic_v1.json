@@ -1,0 +1,40 @@
+{
+  "format": "STHEAD01",
+  "version": 1,
+  "source_weights": "synthetic",
+  "actual_model_values": false,
+  "geometry_source": "tests/fixtures/eaq_head_metadata.json",
+  "geometry_sha256": "c19833bcd2ab89ba7a080918f85666146dd63aae011516aa9f7b3dcad25d9ddb",
+  "input": 5120,
+  "output": 129280,
+  "bits": 6,
+  "codebook": "mul1",
+  "rows": 8,
+  "seed": 20261022,
+  "sampled_H128_blocks": [
+    0,
+    64640,
+    129152
+  ],
+  "total_H128_blocks": 1010,
+  "reference": "strix_trellis.linear.matmul_fp32_stages",
+  "numpy": "2.4.1",
+  "files": {
+    "head.blob": {
+      "bytes": 496704000,
+      "sha256": "115ffb34edb76629ac516ab0f21476446588bd51716b07b4dbe6afeaf9f7ac76"
+    },
+    "head.meta": {
+      "bytes": 100,
+      "sha256": "dc8b0e4da32f8a1992cc8fa8880241dc5fb7d855e93b293c6ce9fc7ac1198d3e"
+    },
+    "input.f32": {
+      "bytes": 163840,
+      "sha256": "dcaacbead3e94877540bb54adfb1e0d9f29469f5121bb06419f8d7aca7018638"
+    },
+    "expected.f32": {
+      "bytes": 12288,
+      "sha256": "ebc370be0dd9b7eca4074e9541aa78bbcb45ebff846e8a8887289d8f313cfe74"
+    }
+  }
+}

@@ -1,0 +1,507 @@
+// Included by api.hip to share the validated context/weight implementation.
+// The experimental entry points never change the established linear dispatch.
+extern "C" void strix_tp_moe_desc_init(strix_tp_moe_desc* d) {
+    if (!d) return;
+    *d = {};
+    d->struct_size = sizeof(*d);
+    d->abi_version = STRIX_TRELLIS_ABI_VERSION;
+    d->alpha = 1.0f;
+    d->input.struct_size = d->output.struct_size = sizeof(strix_tensor_desc);
+    d->input.abi_version = d->output.abi_version = STRIX_TRELLIS_ABI_VERSION;
+    d->input.dtype = d->output.dtype = STRIX_DTYPE_F32;
+    d->input.rank = d->output.rank = 2;
+}
+extern "C" void strix_tp_moe_device_desc_init(strix_tp_moe_device_desc* d) {
+    if (!d) return;
+    *d = {};
+    d->struct_size = sizeof(*d);
+    d->abi_version = STRIX_TRELLIS_ABI_VERSION;
+    d->alpha = 1.0f;
+    d->input.struct_size = d->output.struct_size = sizeof(strix_tensor_desc);
+    d->input.abi_version = d->output.abi_version = STRIX_TRELLIS_ABI_VERSION;
+    d->input.dtype = d->output.dtype = STRIX_DTYPE_F32;
+    d->input.rank = d->output.rank = 2;
+}
+
+#ifdef STRIX_TRELLIS_ENABLE_EXPERIMENTAL_TP
+#include "tp_dense.hpp"
+#include "tp_moe.hpp"
+#include "tp_moe_policy.hpp"
+
+struct strix_tp_dense_plan_impl {
+    strix_context owner;
+    strix_weights weights;
+    strix_trellis::TpDenseArguments arguments;
+    hipStream_t stream;
+};
+struct strix_tp_moe_plan_impl {
+    strix_context owner = nullptr;
+    strix_trellis::TpMoeLaunch arguments{};
+    void* table = nullptr;
+    strix_weights retained[STRIX_TP_MAX_BANK_EXPERTS * 3]{};
+    unsigned retained_count = 0;
+    hipStream_t stream = nullptr;
+};
+
+namespace tp_api {
+using namespace strix_trellis;
+
+strix_status tensor(const strix_tensor_desc& t, uint64_t width, uint32_t rank,
+                    uint64_t rows, uint64_t& bytes, uint64_t& stride) {
+    const auto s = header(&t);
+    if (s != STRIX_SUCCESS) return s;
+    if (enum_bits(t.dtype) != STRIX_DTYPE_F32 || t.rank != rank)
+        return STRIX_ERROR_UNSUPPORTED_FORMAT;
+    if (rank == 1) {
+        if (rows != 1 || t.shape[0] != width || t.shape[1] ||
+            t.strides[0] != 1 || t.strides[1]) return STRIX_ERROR_UNSUPPORTED_FORMAT;
+        stride = width;
+    } else if (rank == 2) {
+        if (t.shape[0] != rows || t.shape[1] != width ||
+            t.strides[0] < width || t.strides[1] != 1)
+            return STRIX_ERROR_UNSUPPORTED_FORMAT;
+        stride = t.strides[0];
+    } else return STRIX_ERROR_UNSUPPORTED_FORMAT;
+    if (!tp_dense_span(rows, width, stride, bytes) || !address(t.data, bytes))
+        return STRIX_ERROR_INVALID_ARGUMENT;
+    if (bytes > t.buffer_bytes) return STRIX_ERROR_INSUFFICIENT_BUFFER;
+    if (!t.data || reinterpret_cast<uintptr_t>(t.data) % alignof(float))
+        return STRIX_ERROR_INVALID_ARGUMENT;
+    return STRIX_SUCCESS;
+}
+
+strix_status properties(strix_context c, hipDeviceProp_t& p) {
+    const auto e = hipGetDeviceProperties(&p, c->device);
+    if (e != hipSuccess) return hip_status(e);
+    if (p.maxThreadsPerBlock < 512 || p.maxThreadsDim[0] < 512 ||
+        p.warpSize != 32) return STRIX_ERROR_UNSUPPORTED_DEVICE;
+    return STRIX_SUCCESS;
+}
+
+bool touches_weights(const void* data, uint64_t bytes, strix_weights w) {
+    return overlap(data, bytes, w->allocation, w->allocation_bytes);
+}
+
+struct MoeValidated {
+    TpMoeTable table{};
+    TpMoeLaunch args{};
+    strix_weights retained[STRIX_TP_MAX_EXPERTS * 3]{};
+    unsigned retained_count = 0;
+    uint64_t x_bytes = 0, y_bytes = 0, hidden_bytes = 0;
+};
+
+// Host-only shape, lifetime-owner and alias checks. No allocation/upload occurs
+// until every expert, route and tensor in the window has passed validation.
+strix_status moe_check(strix_context c, const strix_tp_moe_desc* d,
+                       MoeValidated& v) {
+    auto s = header(d);
+    if (s != STRIX_SUCCESS) return s;
+    if (!std::isfinite(d->alpha) || !std::isfinite(d->beta))
+        return STRIX_ERROR_INVALID_ARGUMENT;
+    if (d->input.rank != 2 || d->input.shape[0] < 1 ||
+        d->input.shape[0] > STRIX_TP_MAX_ROWS) return STRIX_ERROR_UNSUPPORTED_FORMAT;
+    const unsigned rows = static_cast<unsigned>(d->input.shape[0]);
+    s = tensor(d->input, tp_moe_input, 2, rows, v.x_bytes, v.args.x_stride);
+    if (s != STRIX_SUCCESS) return s;
+    s = tensor(d->output, tp_moe_output, 2, rows, v.y_bytes, v.args.y_stride);
+    if (s != STRIX_SUCCESS) return s;
+    if (overlap(d->input.data, v.x_bytes, d->output.data, v.y_bytes))
+        return STRIX_ERROR_INVALID_ARGUMENT;
+    if (d->expert_count < STRIX_TP_TOP_K || d->expert_count > STRIX_TP_MAX_EXPERTS ||
+        d->expert_count > rows * STRIX_TP_TOP_K || !d->experts ||
+        !address(d->experts, d->expert_count * sizeof(strix_tp_expert_desc)) ||
+        d->route_ids_count != rows * STRIX_TP_TOP_K ||
+        d->route_scores_count != rows * STRIX_TP_TOP_K || !d->route_ids || !d->route_scores ||
+        !address(d->route_ids, d->route_ids_count * sizeof(uint32_t)) ||
+        !address(d->route_scores, d->route_scores_count * sizeof(float)))
+        return STRIX_ERROR_INVALID_ARGUMENT;
+    uint32_t expert_ids[STRIX_TP_MAX_EXPERTS]{};
+    const unsigned count = static_cast<unsigned>(d->expert_count);
+    for (unsigned i = 0; i < count; ++i) {
+        const auto& e = d->experts[i];
+        s = header(&e);
+        if (s != STRIX_SUCCESS) return s;
+        if (e.flags) return STRIX_ERROR_INVALID_ARGUMENT;
+        expert_ids[i] = e.expert_id;
+        const strix_weights weights[] = {e.gate, e.up, e.down};
+        for (unsigned k = 0; k < 3; ++k) {
+            const auto w = weights[k];
+            if (!w || w->owner != c) return STRIX_ERROR_INVALID_ARGUMENT;
+            const auto& native = w->device;
+            if (!tp_moe_weight_shape(native.input, native.output, native.bits,
+                                     native.codebook, k == 2))
+                return STRIX_ERROR_UNSUPPORTED_FORMAT;
+            if (touches_weights(d->input.data, v.x_bytes, w) ||
+                touches_weights(d->output.data, v.y_bytes, w))
+                return STRIX_ERROR_INVALID_ARGUMENT;
+            unsigned retained = 0;
+            while (retained < v.retained_count && v.retained[retained] != w) ++retained;
+            if (retained == v.retained_count) {
+                if (w->plan_refs == SIZE_MAX) return STRIX_ERROR_OUT_OF_MEMORY;
+                v.retained[v.retained_count++] = w;
+            }
+        }
+        v.table.experts[i].gate = e.gate->device;
+        v.table.experts[i].up = e.up->device;
+        v.table.experts[i].down = e.down->device;
+    }
+    TpMoeRouting routing{};
+    if (!tp_moe_build_routing(expert_ids, count, d->route_ids, d->route_scores, rows, routing))
+        return STRIX_ERROR_INVALID_ARGUMENT;
+    for (unsigned i = 0; i < count; ++i) {
+        auto& target = v.table.experts[i];
+        target.row_count = routing.row_count[i];
+        std::memcpy(target.token_rows, routing.token_rows[i], sizeof(target.token_rows));
+        std::memcpy(target.route_slots, routing.route_slots[i], sizeof(target.route_slots));
+    }
+    std::memcpy(v.table.expert_indices, routing.expert_indices, sizeof(v.table.expert_indices));
+    std::memcpy(v.table.route_scores, routing.route_scores, sizeof(v.table.route_scores));
+    v.hidden_bytes = tp_moe_hidden_bytes(rows);
+    v.args.x = static_cast<const float*>(d->input.data);
+    v.args.y = static_cast<float*>(d->output.data);
+    v.args.hidden = static_cast<float*>(d->workspace);
+    v.args.rows = rows;
+    v.args.expert_count = count;
+    v.args.alpha = d->alpha;
+    v.args.beta = d->beta;
+    return STRIX_SUCCESS;
+}
+} // namespace tp_api
+
+extern "C" {
+strix_status strix_tp_dense_plan_create(strix_context c, const strix_matmul_desc* d,
+    const strix_stream* stream, strix_tp_dense_plan* out) {
+    return strix_tp_dense_plan_create_tiled(c, d, stream, 0, out);
+}
+strix_status strix_tp_dense_plan_create_tiled(strix_context c, const strix_matmul_desc* d,
+    const strix_stream* stream, uint32_t rows_per_block, strix_tp_dense_plan* out) {
+    if (!out) return STRIX_ERROR_INVALID_ARGUMENT;
+    *out = nullptr;
+    auto s = context_check(c);
+    if (s != STRIX_SUCCESS) return s;
+    hipStream_t hs{};
+    s = stream_check(c, stream, hs);
+    if (s != STRIX_SUCCESS) return s;
+    s = header(d);
+    if (s != STRIX_SUCCESS) return s;
+    if (!d->weights || d->weights->owner != c || d->workspace || d->workspace_bytes ||
+        !std::isfinite(d->alpha) || !std::isfinite(d->beta))
+        return STRIX_ERROR_INVALID_ARGUMENT;
+    const auto& w = d->weights->device;
+    const uint32_t rank = d->input.rank;
+    if (rank != 1 && rank != 2) return STRIX_ERROR_UNSUPPORTED_FORMAT;
+    const uint64_t rows = rank == 1 ? 1 : d->input.shape[0];
+    if (rows < 1 || rows > STRIX_TP_MAX_ROWS) return STRIX_ERROR_UNSUPPORTED_FORMAT;
+    if (rows_per_block > rows) return STRIX_ERROR_INVALID_ARGUMENT;
+    const int tile = rows_per_block ? static_cast<int>(rows_per_block) : static_cast<int>(rows);
+    uint64_t xb = 0, yb = 0, xs = 0, ys = 0;
+    s = tp_api::tensor(d->input, w.input, rank, rows, xb, xs);
+    if (s != STRIX_SUCCESS) return s;
+    s = tp_api::tensor(d->output, w.output, rank, rows, yb, ys);
+    if (s != STRIX_SUCCESS) return s;
+    strix_trellis::TpDenseShape shape{};
+    if (!strix_trellis::tp_dense_shape(w.input, w.output, w.bits, w.codebook,
+                                      static_cast<int>(rows), xs, ys, shape, tile))
+        return STRIX_ERROR_UNSUPPORTED_FORMAT;
+    if (overlap(d->input.data, xb, d->output.data, yb) ||
+        tp_api::touches_weights(d->input.data, xb, d->weights) ||
+        tp_api::touches_weights(d->output.data, yb, d->weights))
+        return STRIX_ERROR_INVALID_ARGUMENT;
+    s = device_buffer(c, d->input.data, xb, alignof(float));
+    if (s != STRIX_SUCCESS) return s;
+    s = device_buffer(c, d->output.data, yb, alignof(float));
+    if (s != STRIX_SUCCESS) return s;
+    hipDeviceProp_t props{};
+    s = tp_api::properties(c, props);
+    if (s != STRIX_SUCCESS) return s;
+    bool supported = false;
+    const auto e = strix_trellis::query_tp_dense_resources(w.bits, tile,
+                                                         props.sharedMemPerBlock, &supported);
+    if (e != hipSuccess) return hip_status(e);
+    if (!supported) return STRIX_ERROR_UNSUPPORTED_DEVICE;
+    if (d->weights->plan_refs == SIZE_MAX) return STRIX_ERROR_OUT_OF_MEMORY;
+    auto p = new (std::nothrow) strix_tp_dense_plan_impl{c, d->weights,
+        {w, static_cast<const float*>(d->input.data), static_cast<float*>(d->output.data),
+         xs, ys, static_cast<int>(rows), d->alpha, d->beta, tile}, hs};
+    if (!p) return STRIX_ERROR_OUT_OF_MEMORY;
+    ++d->weights->plan_refs;
+    *out = p;
+    return STRIX_SUCCESS;
+}
+strix_status strix_tp_dense_plan_submit(strix_tp_dense_plan p) {
+    if (!p) return STRIX_ERROR_INVALID_ARGUMENT;
+    const auto s = context_check(p->owner);
+    if (s != STRIX_SUCCESS) return s;
+    return hip_status(strix_trellis::launch_tp_dense_trusted(p->arguments, p->stream));
+}
+strix_status strix_tp_dense_plan_destroy(strix_tp_dense_plan p) {
+    if (!p) return STRIX_ERROR_INVALID_ARGUMENT;
+    --p->weights->plan_refs;
+    delete p;
+    return STRIX_SUCCESS;
+}
+strix_status strix_tp_moe_workspace_bytes(strix_context c, const strix_tp_moe_desc* d,
+    uint64_t* out) {
+    if (!out) return STRIX_ERROR_INVALID_ARGUMENT;
+    *out = 0;
+    auto s = context_check(c);
+    if (s != STRIX_SUCCESS) return s;
+    tp_api::MoeValidated v{};
+    s = tp_api::moe_check(c, d, v);
+    if (s == STRIX_SUCCESS) *out = v.hidden_bytes;
+    return s;
+}
+strix_status strix_tp_moe_plan_create(strix_context c, const strix_tp_moe_desc* d,
+    const strix_stream* stream, strix_tp_moe_plan* out) {
+    if (!out) return STRIX_ERROR_INVALID_ARGUMENT;
+    *out = nullptr;
+    auto s = context_check(c);
+    if (s != STRIX_SUCCESS) return s;
+    hipStream_t hs{};
+    s = stream_check(c, stream, hs);
+    if (s != STRIX_SUCCESS) return s;
+    tp_api::MoeValidated v{};
+    s = tp_api::moe_check(c, d, v);
+    if (s != STRIX_SUCCESS) return s;
+    if (d->workspace_bytes < v.hidden_bytes) return STRIX_ERROR_INSUFFICIENT_BUFFER;
+    if (!d->workspace || !address(d->workspace, d->workspace_bytes) ||
+        reinterpret_cast<uintptr_t>(d->workspace) % alignment ||
+        overlap(d->workspace, d->workspace_bytes, d->input.data, v.x_bytes) ||
+        overlap(d->workspace, d->workspace_bytes, d->output.data, v.y_bytes))
+        return STRIX_ERROR_INVALID_ARGUMENT;
+    for (unsigned i = 0; i < v.retained_count; ++i)
+        if (tp_api::touches_weights(d->workspace, d->workspace_bytes, v.retained[i]))
+            return STRIX_ERROR_INVALID_ARGUMENT;
+    s = device_buffer(c, d->input.data, v.x_bytes, alignof(float));
+    if (s != STRIX_SUCCESS) return s;
+    s = device_buffer(c, d->output.data, v.y_bytes, alignof(float));
+    if (s != STRIX_SUCCESS) return s;
+    s = device_buffer(c, d->workspace, d->workspace_bytes, alignment);
+    if (s != STRIX_SUCCESS) return s;
+    hipDeviceProp_t props{};
+    s = tp_api::properties(c, props);
+    if (s != STRIX_SUCCESS) return s;
+    bool supported = false;
+    auto e = strix_trellis::query_tp_moe_resources(v.args.rows, props.sharedMemPerBlock, &supported);
+    if (e != hipSuccess) return hip_status(e);
+    if (!supported) return STRIX_ERROR_UNSUPPORTED_DEVICE;
+    auto p = new (std::nothrow) strix_tp_moe_plan_impl;
+    if (!p) return STRIX_ERROR_OUT_OF_MEMORY;
+    void* table = nullptr;
+    e = hipMalloc(&table, sizeof(v.table));
+    if (e != hipSuccess) { delete p; return hip_status(e); }
+    e = hipMemcpyAsync(table, &v.table, sizeof(v.table), hipMemcpyHostToDevice, hs);
+    // Also drain a failed enqueue before releasing the borrowed stack table.
+    const auto completion = hipStreamSynchronize(hs);
+    if (e != hipSuccess || completion != hipSuccess) {
+        (void)hipFree(table);
+        delete p;
+        return hip_status(e != hipSuccess ? e : completion);
+    }
+    p->owner = c;
+    p->stream = hs;
+    p->table = table;
+    p->arguments = v.args;
+    p->arguments.table = static_cast<const strix_trellis::TpMoeTable*>(table);
+    p->retained_count = v.retained_count;
+    for (unsigned i = 0; i < v.retained_count; ++i) {
+        p->retained[i] = v.retained[i];
+        ++p->retained[i]->plan_refs;
+    }
+    *out = p;
+    return STRIX_SUCCESS;
+}
+strix_status strix_tp_moe_plan_create_device(strix_context c, const strix_tp_moe_device_desc* d,
+    const strix_stream* stream, strix_tp_moe_plan* out) {
+    if (!out) return STRIX_ERROR_INVALID_ARGUMENT;
+    *out = nullptr;
+    auto s = context_check(c);
+    if (s != STRIX_SUCCESS) return s;
+    hipStream_t hs{};
+    s = stream_check(c, stream, hs);
+    if (s != STRIX_SUCCESS) return s;
+    s = header(d);
+    if (s != STRIX_SUCCESS) return s;
+    if (!std::isfinite(d->alpha) || !std::isfinite(d->beta))
+        return STRIX_ERROR_INVALID_ARGUMENT;
+    if (d->input.rank != 2 || d->input.shape[0] < 1 || d->input.shape[0] > STRIX_TP_MAX_ROWS)
+        return STRIX_ERROR_UNSUPPORTED_FORMAT;
+    const auto rows = static_cast<unsigned>(d->input.shape[0]);
+    strix_trellis::TpMoeLaunch args{};
+    uint64_t xb = 0, yb = 0;
+    s = tp_api::tensor(d->input, strix_trellis::tp_moe_input, 2, rows, xb, args.x_stride);
+    if (s != STRIX_SUCCESS) return s;
+    s = tp_api::tensor(d->output, strix_trellis::tp_moe_output, 2, rows, yb, args.y_stride);
+    if (s != STRIX_SUCCESS) return s;
+    const uint64_t route_bytes = uint64_t(rows) * STRIX_TP_TOP_K * sizeof(uint32_t);
+    const uint64_t hidden_bytes = strix_trellis::tp_moe_hidden_bytes(rows);
+    if (d->expert_count < STRIX_TP_TOP_K || d->expert_count > STRIX_TP_MAX_BANK_EXPERTS ||
+        !d->experts || !address(d->experts, d->expert_count * sizeof(strix_tp_expert_desc)))
+        return STRIX_ERROR_INVALID_ARGUMENT;
+    if (d->route_ids_bytes != route_bytes || d->route_scores_bytes != route_bytes)
+        return STRIX_ERROR_INVALID_ARGUMENT;
+    if (d->workspace_bytes < hidden_bytes) return STRIX_ERROR_INSUFFICIENT_BUFFER;
+    const void* buffers[] = {d->input.data, d->output.data, d->workspace,
+                             d->route_ids, d->route_scores};
+    const uint64_t bytes[] = {xb, yb, d->workspace_bytes, route_bytes, route_bytes};
+    for (unsigned i = 0; i < 5; ++i) {
+        if (!buffers[i] || !address(buffers[i], bytes[i]) ||
+            reinterpret_cast<uintptr_t>(buffers[i]) % (i == 2 ? alignment : alignof(float)))
+            return STRIX_ERROR_INVALID_ARGUMENT;
+        for (unsigned j = 0; j < i; ++j)
+            if (overlap(buffers[i], bytes[i], buffers[j], bytes[j]))
+                return STRIX_ERROR_INVALID_ARGUMENT;
+    }
+    // Retain each distinct handle once even when several experts share it.
+    strix_weights retained[STRIX_TP_MAX_BANK_EXPERTS * 3]{};
+    unsigned retained_count = 0;
+    const unsigned count = static_cast<unsigned>(d->expert_count);
+    for (unsigned i = 0; i < count; ++i) {
+        const auto& expert = d->experts[i];
+        s = header(&expert);
+        if (s != STRIX_SUCCESS) return s;
+        if (expert.flags || expert.expert_id != i) return STRIX_ERROR_INVALID_ARGUMENT;
+        const strix_weights weights[] = {expert.gate, expert.up, expert.down};
+        for (unsigned k = 0; k < 3; ++k) {
+            const auto w = weights[k];
+            if (!w || w->owner != c) return STRIX_ERROR_INVALID_ARGUMENT;
+            const auto& native = w->device;
+            if (!strix_trellis::tp_moe_weight_shape(native.input, native.output,
+                                                   native.bits, native.codebook, k == 2))
+                return STRIX_ERROR_UNSUPPORTED_FORMAT;
+            for (unsigned b = 0; b < 5; ++b)
+                if (tp_api::touches_weights(buffers[b], bytes[b], w))
+                    return STRIX_ERROR_INVALID_ARGUMENT;
+            unsigned n = 0;
+            while (n < retained_count && retained[n] != w) ++n;
+            if (n == retained_count) {
+                if (w->plan_refs == SIZE_MAX) return STRIX_ERROR_OUT_OF_MEMORY;
+                retained[retained_count++] = w;
+            }
+        }
+    }
+    for (unsigned i = 0; i < 5; ++i) {
+        s = device_buffer(c, buffers[i], bytes[i], i == 2 ? alignment : alignof(float));
+        if (s != STRIX_SUCCESS) return s;
+    }
+    hipDeviceProp_t props{};
+    s = tp_api::properties(c, props);
+    if (s != STRIX_SUCCESS) return s;
+    bool supported = false;
+    auto e = strix_trellis::query_tp_moe_resources(rows, props.sharedMemPerBlock, &supported);
+    if (e != hipSuccess) return hip_status(e);
+    if (!supported) return STRIX_ERROR_UNSUPPORTED_DEVICE;
+    auto p = new (std::nothrow) strix_tp_moe_plan_impl;
+    if (!p) return STRIX_ERROR_OUT_OF_MEMORY;
+    auto bank = new (std::nothrow) strix_trellis::TpMoeExpert[count]{};
+    if (!bank) { delete p; return STRIX_ERROR_OUT_OF_MEMORY; }
+    for (unsigned i = 0; i < count; ++i) {
+        bank[i].gate = d->experts[i].gate->device;
+        bank[i].up = d->experts[i].up->device;
+        bank[i].down = d->experts[i].down->device;
+    }
+    void* table = nullptr;
+    const size_t bank_bytes = count * sizeof(*bank);
+    e = hipMalloc(&table, bank_bytes);
+    if (e != hipSuccess) { delete[] bank; delete p; return hip_status(e); }
+    e = hipMemcpyAsync(table, bank, bank_bytes, hipMemcpyHostToDevice, hs);
+    const auto completion = hipStreamSynchronize(hs);
+    delete[] bank;
+    if (e != hipSuccess || completion != hipSuccess) {
+        (void)hipFree(table);
+        delete p;
+        return hip_status(e != hipSuccess ? e : completion);
+    }
+    args.bank = static_cast<const strix_trellis::TpMoeExpert*>(table);
+    args.bank_count = count;
+    args.device_route_ids = d->route_ids;
+    args.device_route_scores = d->route_scores;
+    args.x = static_cast<const float*>(d->input.data);
+    args.y = static_cast<float*>(d->output.data);
+    args.hidden = static_cast<float*>(d->workspace);
+    args.rows = rows;
+    args.expert_count = rows * STRIX_TP_TOP_K;
+    args.alpha = d->alpha;
+    args.beta = d->beta;
+    p->owner = c;
+    p->stream = hs;
+    p->table = table;
+    p->arguments = args;
+    p->retained_count = retained_count;
+    for (unsigned i = 0; i < retained_count; ++i) {
+        p->retained[i] = retained[i];
+        ++retained[i]->plan_refs;
+    }
+    *out = p;
+    return STRIX_SUCCESS;
+}
+strix_status strix_tp_moe_plan_gate_up(strix_tp_moe_plan p) {
+    if (!p) return STRIX_ERROR_INVALID_ARGUMENT;
+    const auto s = context_check(p->owner);
+    if (s != STRIX_SUCCESS) return s;
+    return hip_status(strix_trellis::launch_tp_moe_gate_up(p->arguments, p->stream));
+}
+strix_status strix_tp_moe_plan_down(strix_tp_moe_plan p) {
+    if (!p) return STRIX_ERROR_INVALID_ARGUMENT;
+    const auto s = context_check(p->owner);
+    if (s != STRIX_SUCCESS) return s;
+    return hip_status(strix_trellis::launch_tp_moe_down(p->arguments, p->stream));
+}
+strix_status strix_tp_moe_plan_submit(strix_tp_moe_plan p) {
+    if (!p) return STRIX_ERROR_INVALID_ARGUMENT;
+    const auto s = context_check(p->owner);
+    if (s != STRIX_SUCCESS) return s;
+    auto e = strix_trellis::launch_tp_moe_gate_up(p->arguments, p->stream);
+    if (e == hipSuccess) e = strix_trellis::launch_tp_moe_down(p->arguments, p->stream);
+    return hip_status(e);
+}
+strix_status strix_tp_moe_plan_destroy(strix_tp_moe_plan p) {
+    if (!p) return STRIX_ERROR_INVALID_ARGUMENT;
+    const auto s = context_check(p->owner);
+    if (s != STRIX_SUCCESS) return s;
+    const auto e = hipFree(p->table);
+    if (e != hipSuccess) return hip_status(e);
+    for (unsigned i = 0; i < p->retained_count; ++i) --p->retained[i]->plan_refs;
+    delete p;
+    return STRIX_SUCCESS;
+}
+} // extern "C"
+#else
+extern "C" {
+strix_status strix_tp_dense_plan_create(strix_context, const strix_matmul_desc*,
+    const strix_stream*, strix_tp_dense_plan* out) {
+    if (!out) return STRIX_ERROR_INVALID_ARGUMENT;
+    *out = nullptr;
+    return STRIX_ERROR_NOT_IMPLEMENTED;
+}
+strix_status strix_tp_dense_plan_create_tiled(strix_context, const strix_matmul_desc*,
+    const strix_stream*, uint32_t, strix_tp_dense_plan* out) {
+    if (!out) return STRIX_ERROR_INVALID_ARGUMENT;
+    *out = nullptr;
+    return STRIX_ERROR_NOT_IMPLEMENTED;
+}
+strix_status strix_tp_dense_plan_submit(strix_tp_dense_plan) { return STRIX_ERROR_NOT_IMPLEMENTED; }
+strix_status strix_tp_dense_plan_destroy(strix_tp_dense_plan) { return STRIX_ERROR_NOT_IMPLEMENTED; }
+strix_status strix_tp_moe_workspace_bytes(strix_context, const strix_tp_moe_desc*, uint64_t* out) {
+    if (!out) return STRIX_ERROR_INVALID_ARGUMENT;
+    *out = 0;
+    return STRIX_ERROR_NOT_IMPLEMENTED;
+}
+strix_status strix_tp_moe_plan_create(strix_context, const strix_tp_moe_desc*,
+    const strix_stream*, strix_tp_moe_plan* out) {
+    if (!out) return STRIX_ERROR_INVALID_ARGUMENT;
+    *out = nullptr;
+    return STRIX_ERROR_NOT_IMPLEMENTED;
+}
+strix_status strix_tp_moe_plan_create_device(strix_context, const strix_tp_moe_device_desc*,
+    const strix_stream*, strix_tp_moe_plan* out) {
+    if (!out) return STRIX_ERROR_INVALID_ARGUMENT;
+    *out = nullptr;
+    return STRIX_ERROR_NOT_IMPLEMENTED;
+}
+strix_status strix_tp_moe_plan_submit(strix_tp_moe_plan) { return STRIX_ERROR_NOT_IMPLEMENTED; }
+strix_status strix_tp_moe_plan_gate_up(strix_tp_moe_plan) { return STRIX_ERROR_NOT_IMPLEMENTED; }
+strix_status strix_tp_moe_plan_down(strix_tp_moe_plan) { return STRIX_ERROR_NOT_IMPLEMENTED; }
+strix_status strix_tp_moe_plan_destroy(strix_tp_moe_plan) { return STRIX_ERROR_NOT_IMPLEMENTED; }
+} // extern "C"
+#endif

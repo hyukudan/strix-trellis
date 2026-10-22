@@ -1,0 +1,14 @@
+name: CPU reference and contracts
+on: [push, pull_request, workflow_dispatch]
+permissions:
+  contents: read
+jobs:
+  cpu:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Install CPU reference dependencies
+        run: python3 -m pip install ./python
+      - name: Test CPU reference, C ABI headers, and GPU queue safety
+        run: bash tools/ci_cpu.sh

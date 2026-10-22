@@ -1,0 +1,14 @@
+node2
+2026-10-20T18:52:01+02:00
+HIP version: 7.16.26385-0000000
+AMD clang version 24.0.0git (https://github.com/ROCm/llvm-project.git d6f6cb691863e9258034ab48c1dfce21689d5606)
+Target: x86_64-unknown-linux-gnu
+Thread model: posix
+InstalledDir: /opt/rocm/core-10.1/lib/llvm/bin
+Configuration file: /opt/rocm/core-10.1/lib/llvm/bin/clang++.cfg
+7386ce48c42f78f15d5190d3c66892ec4255fdd5dc069adbad2103960619ac92  microbench.hip
+07ae360819d8d415e0814edc900b657e5359f51ebd4a9ea87e0fb7108fb7cdc4  trellis_device.hpp
+94ba83d4ca3d6d81ec2e1f727d008c645a15f02ea2790587f4e706d19b6cfd76  host_reference.hpp
+375442caf67c97fefd153cd79f744fcd14d9265d0fcca7a656e4b16662ea2c5a  design_probe.hip
+84421a7f9dd96922db7a57ae222e51fe7ce5c4c2049ae12896066ce558cac81a  microbench-v3
+1e777476d388db72001739720c5e0ecedb925e04df6d35cd49f1ccf804c7b45e  design-probe

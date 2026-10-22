@@ -1,0 +1,2 @@
+#include "runtime_v15_case.hpp"
+int main(int argc,char** argv){try{require(argc==3,"inputs baseline");Runtime r;Fixture f((fs::path(argv[1])/"2.stgpu").string());setbias(f,false);qa_weight_reserve=f.parts.at("trellis").size()+2ull*(f.i+f.n)+1024;Weight w(r,f);Case a(r,f,w.w,8);a.reset(1,0);a.submit();save(fs::path(argv[2])/"q1-y",get(r,a.y.p,a.y.bytes));save(fs::path(argv[2])/"q1-ws",get(r,a.ws.p,a.ws.bytes));a.intact();w.close();host_budget();r.close();return 0;}catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}}

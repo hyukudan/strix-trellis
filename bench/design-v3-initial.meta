@@ -1,0 +1,20 @@
+node2
+2026-10-20T18:44:21+02:00
+HIP version: 7.16.26385-0000000
+AMD clang version 24.0.0git (https://github.com/ROCm/llvm-project.git d6f6cb691863e9258034ab48c1dfce21689d5606)
+Target: x86_64-unknown-linux-gnu
+Thread model: posix
+InstalledDir: /opt/rocm/core-10.1/lib/llvm/bin
+Configuration file: /opt/rocm/core-10.1/lib/llvm/bin/clang++.cfg
+nice -n 10 hipcc -O3 -std=c++17 --offload-arch=gfx1151 microbench.hip -o microbench-v3
+nice -n 10 hipcc -O3 -std=c++17 --offload-arch=gfx1151 design_probe.hip -o design-probe
+7386ce48c42f78f15d5190d3c66892ec4255fdd5dc069adbad2103960619ac92  microbench.hip
+07ae360819d8d415e0814edc900b657e5359f51ebd4a9ea87e0fb7108fb7cdc4  trellis_device.hpp
+94ba83d4ca3d6d81ec2e1f727d008c645a15f02ea2790587f4e706d19b6cfd76  host_reference.hpp
+260d71dd410efa09a3586516a9146c309893787a02d72f0ec7eb16ee1fabae9a  design_probe.hip
+84421a7f9dd96922db7a57ae222e51fe7ce5c4c2049ae12896066ce558cac81a  microbench-v3
+cbcd6ff830f4e7257b736fc9bfc386db87efaa442747bc6865bb74840db87408  design-probe
+/sys/class/drm/card0/device/pp_dpm_sclk
+0: 600Mhz *
+1: 1100Mhz 
+2: 2900Mhz 

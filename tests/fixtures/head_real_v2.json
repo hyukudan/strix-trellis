@@ -1,0 +1,101 @@
+{
+  "format": "STHEAD01",
+  "version": 2,
+  "source_weights": "shared-eaq-v1",
+  "actual_model_values": true,
+  "geometry_source": "tests/fixtures/eaq_head_metadata.json",
+  "geometry_sha256": "c19833bcd2ab89ba7a080918f85666146dd63aae011516aa9f7b3dcad25d9ddb",
+  "input": 5120,
+  "output": 129280,
+  "bits": 6,
+  "codebook": "mul1",
+  "rows": 8,
+  "seed": 20261022,
+  "sampled_H128_blocks": [
+    0,
+    64640,
+    129152
+  ],
+  "total_H128_blocks": 1010,
+  "reference": "strix_trellis.linear.matmul_fp32_stages",
+  "numpy": "2.4.1",
+  "files": {
+    "head.blob": {
+      "bytes": 496704000,
+      "sha256": "685f135a2a0c46f293969f563683a0d26984ffa240ca0fd455fc7d501ea2fd64"
+    },
+    "head.meta": {
+      "bytes": 104,
+      "sha256": "4bb8ed2f44cd0f3a28b9e2ae81cbd51918ea58187b44d53a249dddc068f9fbbd"
+    },
+    "input.f32": {
+      "bytes": 163840,
+      "sha256": "a25e17a36d0bda262c29f6f055fa75d4fb1016b1dbae8dc067d56f33bc6aea20"
+    },
+    "expected.f32": {
+      "bytes": 12288,
+      "sha256": "1b154bea920c83055827a04da8f5b5ea2b28bc30dd20101ac7bac87f587b9ca9"
+    }
+  },
+  "generator_sha256": "8abbbff07a46430a55a55e4440684e663031bf210ff358237b8560a6f5f3a6e4",
+  "reference_source_sha256": {
+    "codec.py": "2ac0e1bb8b207f5c7c9d0db0af9c717d8e89801dc6ee166ecf017fb577f2905b",
+    "linear.py": "59c6b65f0c5d1c6c0347049b585ff1502cc7f5bac3780f112ba70fe8942ddf0a"
+  },
+  "source": {
+    "kind": "existing_shared_cache",
+    "file_name": "model-00038-of-00039.part.safetensors",
+    "header_sha256": "d7ebc0b80a36fde0733cecfb4d74581095d4afd07ce2c0a012ba6db35fac4007",
+    "prefix": "head",
+    "file_bytes": 606112992,
+    "selected_tensors": {
+      "trellis": {
+        "dtype": "I16",
+        "shape": [
+          320,
+          8080,
+          96
+        ],
+        "data_offsets": [
+          109669400,
+          606104600
+        ]
+      },
+      "suh": {
+        "dtype": "F16",
+        "shape": [
+          5120
+        ],
+        "data_offsets": [
+          109400596,
+          109410836
+        ]
+      },
+      "svh": {
+        "dtype": "F16",
+        "shape": [
+          129280
+        ],
+        "data_offsets": [
+          109410836,
+          109669396
+        ]
+      },
+      "mul1": {
+        "dtype": "I32",
+        "shape": [],
+        "data_offsets": [
+          109669396,
+          109669400
+        ]
+      }
+    },
+    "independent_payload_redownload": false,
+    "tensor_sha256": {
+      "trellis": "9be908082b63ad9376961831dbe4cd70720876df4faa62c554c25f0aab7da3a2",
+      "suh": "9c2996e64ee8ebbfaf31e1f217b3712713288e416e86f340ae469f21c9878411",
+      "svh": "c6643247f4b82dd640a5389a6e1a8a6157f2458a1d69b02fa1a92181dc22448a",
+      "mul1": "20feb8ff6dbb9b28746f70893914cd343f8a92629ad812923fb29772030dd082"
+    }
+  }
+}

@@ -1,0 +1,120 @@
+{
+  "model": "Mia-AiLab/DeepSeek-V4.1-Flash-1017-EXL3-EAQ-v1-2.9-bpw",
+  "revision": "45ee5d0fd106c94a3d77f721e09cbb2f50e5a16b",
+  "shard": "model-00001-of-00039.safetensors",
+  "url": "https://huggingface.co/Mia-AiLab/DeepSeek-V4.1-Flash-1017-EXL3-EAQ-v1-2.9-bpw/resolve/45ee5d0fd106c94a3d77f721e09cbb2f50e5a16b/model-00001-of-00039.safetensors",
+  "prefix": "layers.0.attn.wkv",
+  "fixture_directory": "external-data/fixtures",
+  "tensors": {
+    "layers.0.attn.wkv.trellis": {
+      "dtype": "I16",
+      "shape": [
+        320,
+        32,
+        96
+      ],
+      "data_offsets": [
+        6541640764,
+        6543606844
+      ],
+      "file": "layers.0.attn.wkv.trellis.bin",
+      "bytes": 1966080,
+      "sha256": "d371339f4992ef6ba31f914e0284dad17f3f37ba8bb19e52c137bd349f62e7d7",
+      "absolute_range": [
+        6542134366,
+        6544100446
+      ]
+    },
+    "layers.0.attn.wkv.suh": {
+      "dtype": "F16",
+      "shape": [
+        5120
+      ],
+      "data_offsets": [
+        6541629496,
+        6541639736
+      ],
+      "file": "layers.0.attn.wkv.suh.bin",
+      "bytes": 10240,
+      "sha256": "867a854cd8bbe64c0cc01863ead55ede80917a5ee55a285acafb77719abf1a2b",
+      "absolute_range": [
+        6542123098,
+        6542133338
+      ]
+    },
+    "layers.0.attn.wkv.svh": {
+      "dtype": "F16",
+      "shape": [
+        512
+      ],
+      "data_offsets": [
+        6541639736,
+        6541640760
+      ],
+      "file": "layers.0.attn.wkv.svh.bin",
+      "bytes": 1024,
+      "sha256": "81ed45b558c0cc750e3a8beea4f86a3257a23af341d2a625dbb7de6376288742",
+      "absolute_range": [
+        6542133338,
+        6542134362
+      ]
+    },
+    "layers.0.attn.wkv.mul1": {
+      "dtype": "I32",
+      "shape": [],
+      "data_offsets": [
+        6541640760,
+        6541640764
+      ],
+      "file": "layers.0.attn.wkv.mul1.bin",
+      "bytes": 4,
+      "sha256": "20feb8ff6dbb9b28746f70893914cd343f8a92629ad812923fb29772030dd082",
+      "absolute_range": [
+        6542134362,
+        6542134366
+      ]
+    }
+  },
+  "header_bytes": 493594,
+  "header_sha256": "f942eb8ca490f99c673b222a0df95398995da6c2a9a82cc52e670ed44c0aaa61",
+  "downloaded_bytes": 2470950,
+  "ranges": [
+    {
+      "start": 0,
+      "stop_exclusive": 8,
+      "bytes": 8,
+      "sha256": "62c6b6d174b9c269764ca9660a4435ec12e55647954f6eb9d79d6c01e5e2607d"
+    },
+    {
+      "start": 8,
+      "stop_exclusive": 493602,
+      "bytes": 493594,
+      "sha256": "f942eb8ca490f99c673b222a0df95398995da6c2a9a82cc52e670ed44c0aaa61"
+    },
+    {
+      "start": 6542134366,
+      "stop_exclusive": 6544100446,
+      "bytes": 1966080,
+      "sha256": "d371339f4992ef6ba31f914e0284dad17f3f37ba8bb19e52c137bd349f62e7d7"
+    },
+    {
+      "start": 6542123098,
+      "stop_exclusive": 6542133338,
+      "bytes": 10240,
+      "sha256": "867a854cd8bbe64c0cc01863ead55ede80917a5ee55a285acafb77719abf1a2b"
+    },
+    {
+      "start": 6542133338,
+      "stop_exclusive": 6542134362,
+      "bytes": 1024,
+      "sha256": "81ed45b558c0cc750e3a8beea4f86a3257a23af341d2a625dbb7de6376288742"
+    },
+    {
+      "start": 6542134362,
+      "stop_exclusive": 6542134366,
+      "bytes": 4,
+      "sha256": "20feb8ff6dbb9b28746f70893914cd343f8a92629ad812923fb29772030dd082"
+    }
+  ],
+  "evidence": "Actual tensor bytes; no upstream numerical parity established"
+}

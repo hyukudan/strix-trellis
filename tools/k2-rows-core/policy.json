@@ -1,0 +1,14 @@
+{
+  "modes": {"0": "immutable V11 launch_gemv_lds_core", "1": "Global U4B", "2": "LDS8 U4B"},
+  "rows": [2, 4, 8],
+  "shapes": [[8192, 5120], [1280, 32768]],
+  "splits": 4,
+  "clones": 26,
+  "packed_resident_bytes": 272629760,
+  "timing": "one warm rotation, then eleven sweeps in alternating 0/1/2 and 2/1/0 order; core and full three-stage device operator separately",
+  "selection": "For each shape and Rows choose the lowest FULL operator median in campaign 1 (tie: lower numeric mode). Freeze that selection before campaign 2. Propose a guard only if the same chosen non-control mode reduces FULL median >=2% versus V11 in each campaign and all qualification gates pass. Core wins are reported separately.",
+  "maximum_physical_requests": 2,
+  "lease_seconds": 180,
+  "internal_seconds": 145,
+  "controller_seconds": 1195
+}

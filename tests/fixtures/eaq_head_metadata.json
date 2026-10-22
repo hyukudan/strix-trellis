@@ -1,0 +1,366 @@
+{
+  "model": "Mia-AiLab/DeepSeek-V4.1-Flash-1017-EXL3-EAQ-v1-2.9-bpw",
+  "revision": "45ee5d0fd106c94a3d77f721e09cbb2f50e5a16b",
+  "download_budget_bytes": 20000000,
+  "downloaded_bytes_this_run": 16165089,
+  "evidence": [
+    {
+      "url": "https://huggingface.co/Mia-AiLab/DeepSeek-V4.1-Flash-1017-EXL3-EAQ-v1-2.9-bpw/resolve/45ee5d0fd106c94a3d77f721e09cbb2f50e5a16b/model.safetensors.index.json",
+      "file": "eaq-head-index-range-0-65536.json.part",
+      "bytes": 65536,
+      "cached": true,
+      "absolute_range": [
+        0,
+        65536
+      ],
+      "sha256": "f069a6c5f9e24e5aed44e069f092618a1689bafe66343484933d7ca095dd7df1"
+    },
+    {
+      "url": "https://huggingface.co/Mia-AiLab/DeepSeek-V4.1-Flash-1017-EXL3-EAQ-v1-2.9-bpw/resolve/45ee5d0fd106c94a3d77f721e09cbb2f50e5a16b/model.safetensors.index.json",
+      "file": "eaq-head-index-range-15438674-15504210.json.part",
+      "bytes": 65536,
+      "cached": true,
+      "absolute_range": [
+        15438674,
+        15504210
+      ],
+      "sha256": "ada5ff61c7554bc5ac3e973c1c9ec4813c69f5d6929ba0faf979bd32357f23a4"
+    },
+    {
+      "url": "https://huggingface.co/Mia-AiLab/DeepSeek-V4.1-Flash-1017-EXL3-EAQ-v1-2.9-bpw/resolve/45ee5d0fd106c94a3d77f721e09cbb2f50e5a16b/config.json",
+      "file": "eaq-head-pinned-config.json",
+      "bytes": 3563,
+      "sha256": "4eac47f0da99a65f2bcfb97ca357f7d5388a79c9b377d6dd65b1ed18548d846d",
+      "cached": true,
+      "request": "small metadata GET; bounded read"
+    },
+    {
+      "url": "https://huggingface.co/Mia-AiLab/DeepSeek-V4.1-Flash-1017-EXL3-EAQ-v1-2.9-bpw/resolve/45ee5d0fd106c94a3d77f721e09cbb2f50e5a16b/README.md",
+      "file": "eaq-head-pinned-model-card.md",
+      "bytes": 14350,
+      "sha256": "177f7aa70a21c4ab124e49c979148cec5d51720c9dc6dd1d3b4491bb86ff5104",
+      "cached": true,
+      "request": "small metadata GET; bounded read"
+    },
+    {
+      "url": "https://huggingface.co/Mia-AiLab/DeepSeek-V4.1-Flash-1017-EXL3-EAQ-v1-2.9-bpw/resolve/45ee5d0fd106c94a3d77f721e09cbb2f50e5a16b/model.safetensors.index.json",
+      "file": "eaq-head-pinned-full-index.json",
+      "bytes": 15504210,
+      "sha256": "6c4679e6407806ab4e63f9a2a46a825c5cab4990cd916723721e7ba0c6bb7d77",
+      "cached": false,
+      "request": "small metadata GET; bounded read"
+    },
+    {
+      "url": "https://huggingface.co/Mia-AiLab/DeepSeek-V4.1-Flash-1017-EXL3-EAQ-v1-2.9-bpw/resolve/45ee5d0fd106c94a3d77f721e09cbb2f50e5a16b/model-00038-of-00039.safetensors",
+      "file": "eaq-head-model-00038-of-00039.safetensors-header.json",
+      "bytes": 660867,
+      "cached": false,
+      "sha256": "c39d77445805a510526cc4cf3fb2547b8185ed8f2af04e1dd897660ff9dbd3a1",
+      "absolute_range": [
+        8,
+        660875
+      ],
+      "ranges_this_run": [
+        {
+          "start": 0,
+          "stop_exclusive": 8,
+          "bytes": 8,
+          "sha256": "6b9e0b64537f1e9548d63ec05f803905dabfc5977319c1026095a99152c73b7f"
+        },
+        {
+          "start": 8,
+          "stop_exclusive": 660875,
+          "bytes": 660867,
+          "sha256": "c39d77445805a510526cc4cf3fb2547b8185ed8f2af04e1dd897660ff9dbd3a1"
+        }
+      ]
+    },
+    {
+      "url": "https://huggingface.co/Mia-AiLab/DeepSeek-V4.1-Flash-1017-EXL3-EAQ-v1-2.9-bpw/resolve/45ee5d0fd106c94a3d77f721e09cbb2f50e5a16b/model-00038-of-00039.safetensors",
+      "file": "eaq-head-head.mul1.bin",
+      "bytes": 4,
+      "cached": false,
+      "absolute_range": [
+        5223519135,
+        5223519139
+      ],
+      "sha256": "20feb8ff6dbb9b28746f70893914cd343f8a92629ad812923fb29772030dd082"
+    }
+  ],
+  "head_weight_map": {
+    "head.suh": "model-00038-of-00039.safetensors",
+    "head.svh": "model-00038-of-00039.safetensors",
+    "head.mul1": "model-00038-of-00039.safetensors",
+    "head.trellis": "model-00038-of-00039.safetensors"
+  },
+  "headers": {
+    "model-00038-of-00039.safetensors": {
+      "header_sha256": "c39d77445805a510526cc4cf3fb2547b8185ed8f2af04e1dd897660ff9dbd3a1",
+      "header_bytes": 660867,
+      "safetensors_metadata": null
+    }
+  },
+  "tensors": {
+    "head.suh": {
+      "dtype": "F16",
+      "shape": [
+        5120
+      ],
+      "data_offsets": [
+        5222589460,
+        5222599700
+      ],
+      "shard": "model-00038-of-00039.safetensors",
+      "absolute_range": [
+        5223250335,
+        5223260575
+      ]
+    },
+    "head.svh": {
+      "dtype": "F16",
+      "shape": [
+        129280
+      ],
+      "data_offsets": [
+        5222599700,
+        5222858260
+      ],
+      "shard": "model-00038-of-00039.safetensors",
+      "absolute_range": [
+        5223260575,
+        5223519135
+      ]
+    },
+    "head.mul1": {
+      "dtype": "I32",
+      "shape": [],
+      "data_offsets": [
+        5222858260,
+        5222858264
+      ],
+      "shard": "model-00038-of-00039.safetensors",
+      "absolute_range": [
+        5223519135,
+        5223519139
+      ],
+      "marker_hex": "0x83dcd12d",
+      "marker_sha256": "20feb8ff6dbb9b28746f70893914cd343f8a92629ad812923fb29772030dd082"
+    },
+    "head.trellis": {
+      "dtype": "I16",
+      "shape": [
+        320,
+        8080,
+        96
+      ],
+      "data_offsets": [
+        5222858264,
+        5719293464
+      ],
+      "shard": "model-00038-of-00039.safetensors",
+      "absolute_range": [
+        5223519139,
+        5719954339
+      ]
+    }
+  },
+  "geometry": {
+    "head": {
+      "input": 5120,
+      "output": 129280,
+      "bits": 6.0,
+      "codebook": "mul1",
+      "marker_hex": "0x83dcd12d",
+      "scales_dtype": [
+        "F16",
+        "F16"
+      ],
+      "scale_values": "unknown: no scale payload downloaded",
+      "head_weight_values": "not downloaded"
+    }
+  },
+  "config": {
+    "architectures": [
+      "DeepseekV41ForCausalLM"
+    ],
+    "model_type": "deepseek_v41",
+    "dtype": "bfloat16",
+    "transformers_version": "5.6.0",
+    "bos_token_id": 0,
+    "eos_token_id": 1,
+    "pad_token_id": 2,
+    "image_token_id": 129264,
+    "quantization_config": {
+      "quant_method": "exl3",
+      "version": "1.6.1",
+      "avg_bits": 2.9,
+      "head_bits": 6,
+      "out_scales": "always",
+      "codebook": "mul1",
+      "original_quantization_config": {
+        "quant_method": "fp8",
+        "activation_scheme": "dynamic",
+        "weight_block_size": [
+          32,
+          32
+        ],
+        "scale_fmt": "ue8m0",
+        "expert_dtype": "fp4"
+      },
+      "mtp_bits": 4
+    },
+    "text_config": {
+      "model_type": "deepseek_v41_text",
+      "vocab_size": 129280,
+      "hidden_size": 5120,
+      "moe_intermediate_size": 2304,
+      "num_hidden_layers": 40,
+      "num_attention_heads": 64,
+      "num_key_value_heads": 1,
+      "head_dim": 512,
+      "qk_rope_head_dim": 64,
+      "q_lora_rank": 1280,
+      "o_lora_rank": 1024,
+      "o_groups": 8,
+      "hidden_act": "silu",
+      "swiglu_limit": 10.0,
+      "rms_norm_eps": 1e-20,
+      "attention_bias": false,
+      "attention_dropout": 0.0,
+      "initializer_range": 0.02,
+      "use_cache": true,
+      "tie_word_embeddings": false,
+      "max_position_embeddings": 1048576,
+      "rope_theta": 10000,
+      "rope_scaling": {
+        "rope_type": "yarn",
+        "factor": 16,
+        "beta_fast": 32,
+        "beta_slow": 1,
+        "original_max_position_embeddings": 65536
+      },
+      "n_routed_experts": 384,
+      "n_shared_experts": 1,
+      "num_experts_per_tok": 6,
+      "scoring_func": "sqrtsoftplus",
+      "topk_method": "noaux_tc",
+      "norm_topk_prob": true,
+      "routed_scaling_factor": 1.5,
+      "sliding_window": 128,
+      "compress_ratios": [
+        0,
+        0,
+        2,
+        2,
+        2,
+        2,
+        2,
+        2,
+        2,
+        2,
+        2,
+        2,
+        2,
+        2,
+        2,
+        2,
+        2,
+        2,
+        2,
+        2,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        0,
+        0,
+        0
+      ],
+      "compress_rope_theta": 160000,
+      "kv_source_layer_ids": [
+        2,
+        8,
+        14,
+        20
+      ],
+      "index_source_layer_ids": [
+        2,
+        8,
+        14,
+        20,
+        24,
+        28,
+        32,
+        36
+      ],
+      "index_n_heads": 32,
+      "index_head_dim": 128,
+      "index_topk": 512,
+      "candidate_source_layer_id": 20,
+      "candidate_topk_blocks": 2048,
+      "candidate_block_size": 8,
+      "hc_mult": 4,
+      "hc_sinkhorn_iters": 20,
+      "hc_eps": 1e-06,
+      "engram_layer_ids": [
+        1,
+        14
+      ],
+      "engram_num_embeddings": [
+        384006168,
+        384016682
+      ],
+      "engram_max_ngram_size": 4,
+      "engram_vocab_size": 16000000,
+      "engram_n_heads": 8,
+      "engram_head_dim": 256,
+      "engram_pad_token_id": 2,
+      "engram_compressed_vocab_size": 99092,
+      "num_nextn_predict_layers": 3,
+      "dspark_block_size": 5,
+      "dspark_noise_token_id": 128799,
+      "dspark_target_layer_ids": [
+        37,
+        38,
+        39
+      ],
+      "dspark_markov_rank": 256,
+      "dspark_n_routed_experts": 128,
+      "dspark_num_experts_per_tok": 3
+    },
+    "vision_config": {
+      "model_type": "deepseek_v41_vision",
+      "num_hidden_layers": 32,
+      "hidden_size": 1024,
+      "num_attention_heads": 16,
+      "intermediate_size": 2816,
+      "patch_size": 14,
+      "rope_theta": 10000,
+      "downsample_ratio": 3,
+      "max_image_tokens": 1024,
+      "min_pixels": 295936,
+      "max_wh_ratio": null
+    },
+    "engram_table_dir": null
+  },
+  "model_card_license_metadata": [
+    "license: mit"
+  ],
+  "gpu_validation": "Not executed; metadata only"
+}

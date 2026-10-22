@@ -1,0 +1,117 @@
+// Literal body from the physically tested independent grouped prototype.
+#include "gemv_output_direct.hpp"
+#include "fused_output_policy.hpp"
+#include "packed_decoder.hpp"
+#include "hadamard.hpp"
+#include <cmath>
+namespace strix_trellis::grouped_direct {
+enum class Mode { GlobalPartial, Direct, Diagnostic };
+using Pair = _Float16 __attribute__((ext_vector_type(2)));
+template<int Bits,int Groups,Mode M>
+__global__ __launch_bounds__(256*Groups) void grouped(const uint32_t* __restrict__ packed,
+    const _Float16* __restrict__ a,const uint16_t* __restrict__ svh,
+    const float* __restrict__ bias,float* __restrict__ y,float* __restrict__ dump,
+    int input,int output,float alpha,float beta) {
+    __shared__ uint32_t activation[Groups][512];
+    __shared__ float partial[Groups][8][128];
+    const int lane=threadIdx.x&31, local=threadIdx.x&255;
+    const int wave=__builtin_amdgcn_readfirstlane(int(threadIdx.x)/32);
+    const int g=__builtin_amdgcn_readfirstlane(wave/8);
+    const int nw=__builtin_amdgcn_readfirstlane(wave%8);
+    const int tile=__builtin_amdgcn_readfirstlane(int(blockIdx.x)*8+nw);
+    const int length=(input/16)/Groups, end=(g+1)*length;
+    float acc[8][2]={};
+    for(int base=g*length;base<end;base+=8) {
+        #pragma unroll
+        for(int pass=0;pass<2;++pass) {
+            int q=local+256*pass, r=q/64, p=q%64;
+            if(base+p/8<end) {
+                uint32_t word;
+                __builtin_memcpy(&word,a+size_t(r)*input+2*(base*8+p),4);
+                activation[g][q]=word;
+            }
+        }
+        __syncthreads();
+        for(int kk=0;kk<8 && base+kk<end;++kk) {
+            packed_decode::SaddrLane<Bits> reader(packed+
+                (size_t(base+kk)*(output/16)+tile)*Bits*8);
+            Pair av[8][2];
+            #pragma unroll
+            for(int r=0;r<8;++r) {
+                av[r][0]=__builtin_bit_cast(Pair,activation[g][r*64+kk*8+(lane&3)]);
+                av[r][1]=__builtin_bit_cast(Pair,activation[g][r*64+kk*8+(lane&3)+4]);
+            }
+            #pragma unroll
+            for(int p=0;p<4;++p) {
+                uint32_t first,second;
+                if(p==0){first=reader.template state<0>();second=reader.template state<1>();}
+                else if(p==1){first=reader.template state<2>();second=reader.template state<3>();}
+                else if(p==2){first=reader.template state<4>();second=reader.template state<5>();}
+                else {first=reader.template state<6>();second=reader.template state<7>();}
+                Pair weight=__builtin_bit_cast(Pair,packed_decode::mul1_half2(first,second));
+                #pragma unroll
+                for(int r=0;r<8;++r)
+                    acc[r][p/2]=__builtin_amdgcn_fdot2(weight,av[r][p&1],acc[r][p/2],false);
+            }
+        }
+        __syncthreads();
+    }
+    #pragma unroll
+    for(int r=0;r<8;++r) {
+        #pragma unroll
+        for(int h=0;h<2;++h) {
+            float v=acc[r][h];
+            v+=__shfl_down(v,2,4);v+=__shfl_down(v,1,4);
+            if((lane&3)==0) {
+                int c=nw*16+lane/4+h*8;
+                if constexpr(M!=Mode::GlobalPartial) partial[g][r][c]=v;
+                if constexpr(M!=Mode::Direct)
+                    dump[(size_t(g)*8+r)*output+size_t(blockIdx.x)*128+c]=v;
+            }
+        }
+    }
+    // Every thread publishes before any wave may leave the CTA.
+    __syncthreads();
+    if constexpr(M!=Mode::GlobalPartial) {
+        if(wave>=8)return;
+        float values[4]={};
+        // Deliberately preserve the +0 origin and ascending split association.
+        for(int split=0;split<Groups;++split) {
+            #pragma unroll
+            for(int j=0;j<4;++j) values[j]+=partial[split][wave][lane+32*j];
+        }
+        hadamard128(values);
+        #pragma unroll
+        for(int j=0;j<4;++j) {
+            size_t c=size_t(blockIdx.x)*128+lane+32*j;
+            size_t index=size_t(wave)*output+c;
+            float value=values[j]*__half2float(__ushort_as_half(svh[c]));
+            if(bias)value+=bias[c];
+            value*=alpha;
+            if(beta!=0)value+=beta*y[index];
+            y[index]=value;
+        }
+    }
+}
+
+} // namespace strix_trellis::grouped_direct
+namespace strix_trellis {
+void grouped_direct_functions(const void** k5g1,const void** k6g2) {
+    *k5g1=reinterpret_cast<const void*>(grouped_direct::grouped<5,1,grouped_direct::Mode::Direct>);
+    *k6g2=reinterpret_cast<const void*>(grouped_direct::grouped<6,2,grouped_direct::Mode::Direct>);
+}
+hipError_t launch_grouped_direct_trusted(const DeviceWeights& w,const _Float16* a,
+    float* y,hipStream_t stream,float alpha,float beta,int groups) {
+    if(!w.trellis || !w.svh || !a || !y || !std::isfinite(alpha) || !std::isfinite(beta) ||
+        groups!=fused_output_groups(w.input,w.output,w.bits,w.codebook,8,4,false,
+            w.fused_output_capable,!(reinterpret_cast<uintptr_t>(a)&3u))) return hipErrorInvalidValue;
+    if(groups==1)
+        grouped_direct::grouped<5,1,grouped_direct::Mode::Direct><<<w.output/128,256,0,stream>>>(
+            w.trellis,a,w.svh,w.bias,y,nullptr,w.input,w.output,alpha,beta);
+    else if(groups==2)
+        grouped_direct::grouped<6,2,grouped_direct::Mode::Direct><<<w.output/128,512,0,stream>>>(
+            w.trellis,a,w.svh,w.bias,y,nullptr,w.input,w.output,alpha,beta);
+    else return hipErrorInvalidValue;
+    return hipGetLastError();
+}
+}

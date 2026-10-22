@@ -1,0 +1,45 @@
+{
+  "modes": {
+    "0": "immutable V11 launch_gemv_lds_core",
+    "1": "Global U4B",
+    "2": "LDS8 U4B"
+  },
+  "rows": [
+    2,
+    4,
+    8
+  ],
+  "shapes": [
+    [
+      8192,
+      5120
+    ],
+    [
+      1280,
+      32768
+    ]
+  ],
+  "splits": 4,
+  "clones": 26,
+  "packed_resident_bytes": 272629760,
+  "timing": "one warm rotation, then eleven sweeps in alternating 0/1/2 and 2/1/0 order; core and full three-stage device operator separately",
+  "selection": "ROOT preselects fixed mode 2 LDS8 U4B for all six shapes/Rows BEFORE either NEW campaign. Mode 1 Global is diagnostic only. Require >=2 percent full operator median gain versus immutable V11 in EACH of two new complete campaigns with every gate passing. Prior attempts and their empty selection are immutable EXPLORATION ONLY.",
+  "maximum_physical_requests": 2,
+  "lease_seconds": 180,
+  "internal_seconds": 145,
+  "controller_seconds": 1195,
+  "base": "c8ae3d39703e6479fd3620081f59eae4c53e6a67",
+  "preselected_mode": 2,
+  "small_dimensions": [
+    16,
+    80,
+    128,
+    176,
+    272,
+    112,
+    240
+  ],
+  "original_small_cases": 5760,
+  "added_small_cases": 2304,
+  "host_timing": "steady_clock interval enclosing event record, 26 issues and event synchronization, divided by 26; supplementary, selection uses original HIP event metric"
+}

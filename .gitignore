@@ -1,0 +1,11 @@
+build*/
+__pycache__/
+*.pyc
+.venv/
+*.safetensors
+*.bin
+.venv*/
+
+*.egg-info/
+dist/
+/external-data/

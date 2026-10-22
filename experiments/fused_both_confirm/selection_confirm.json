@@ -1,0 +1,8 @@
+{
+  "candidate": "D",
+  "description": "Frozen original G4 R1 direct both-H fusion",
+  "geometries": ["q_b", "wo_b", "inverse", "shared", "head"],
+  "selection_time": "Before either physical campaign",
+  "proposal_gate": "At least 2 percent complete-operator median latency reduction versus A, event and host, in each of two passing physical campaigns",
+  "activation": false
+}

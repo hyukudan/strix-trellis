@@ -1,0 +1,95 @@
+{
+  "note": "Static vector opcode count, not dynamic hardware counters. Includes address/checksum/reduction and masked lanes; excludes SALU, memory and ds_bpermute from VALU number. cb=mul1 compile-time specialized.",
+  "kernels": [
+    {
+      "bits": 2,
+      "mode": 2,
+      "vector_instructions_static": 128,
+      "lds_permute_instructions_static": 7,
+      "valu_lane_ops_per_packed_byte_upper": 64.0,
+      "vgprs": 14,
+      "scratch_bytes": 0
+    },
+    {
+      "bits": 2,
+      "mode": 3,
+      "vector_instructions_static": 103,
+      "lds_permute_instructions_static": 7,
+      "valu_lane_ops_per_packed_byte_upper": 51.5,
+      "vgprs": 11,
+      "scratch_bytes": 0
+    },
+    {
+      "bits": 3,
+      "mode": 2,
+      "vector_instructions_static": 146,
+      "lds_permute_instructions_static": 12,
+      "valu_lane_ops_per_packed_byte_upper": 48.667,
+      "vgprs": 22,
+      "scratch_bytes": 0
+    },
+    {
+      "bits": 3,
+      "mode": 3,
+      "vector_instructions_static": 109,
+      "lds_permute_instructions_static": 7,
+      "valu_lane_ops_per_packed_byte_upper": 36.333,
+      "vgprs": 11,
+      "scratch_bytes": 0
+    },
+    {
+      "bits": 4,
+      "mode": 2,
+      "vector_instructions_static": 97,
+      "lds_permute_instructions_static": 7,
+      "valu_lane_ops_per_packed_byte_upper": 24.25,
+      "vgprs": 11,
+      "scratch_bytes": 0
+    },
+    {
+      "bits": 4,
+      "mode": 3,
+      "vector_instructions_static": 97,
+      "lds_permute_instructions_static": 7,
+      "valu_lane_ops_per_packed_byte_upper": 24.25,
+      "vgprs": 11,
+      "scratch_bytes": 0
+    },
+    {
+      "bits": 6,
+      "mode": 2,
+      "vector_instructions_static": 153,
+      "lds_permute_instructions_static": 13,
+      "valu_lane_ops_per_packed_byte_upper": 25.5,
+      "vgprs": 33,
+      "scratch_bytes": 0
+    },
+    {
+      "bits": 6,
+      "mode": 3,
+      "vector_instructions_static": 129,
+      "lds_permute_instructions_static": 13,
+      "valu_lane_ops_per_packed_byte_upper": 21.5,
+      "vgprs": 18,
+      "scratch_bytes": 0
+    },
+    {
+      "bits": 8,
+      "mode": 2,
+      "vector_instructions_static": 106,
+      "lds_permute_instructions_static": 11,
+      "valu_lane_ops_per_packed_byte_upper": 13.25,
+      "vgprs": 12,
+      "scratch_bytes": 0
+    },
+    {
+      "bits": 8,
+      "mode": 3,
+      "vector_instructions_static": 108,
+      "lds_permute_instructions_static": 11,
+      "valu_lane_ops_per_packed_byte_upper": 13.5,
+      "vgprs": 13,
+      "scratch_bytes": 0
+    }
+  ]
+}

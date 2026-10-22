@@ -1,0 +1,9 @@
+strix-trellis
+Copyright 2026 hyukudan
+
+This product includes software developed by hyukudan.
+
+The EXL3 format is defined by exllamav3 (https://github.com/turboderp-org/exllamav3,
+MIT License). QTIP is described in Tseng et al., "QTIP: Quantization with
+Trellises and Incoherence Processing", NeurIPS 2024. No code from either
+project is included in this repository.

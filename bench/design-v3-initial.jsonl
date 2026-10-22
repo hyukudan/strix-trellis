@@ -1,0 +1,4 @@
+{"fixture":"EAQ_v1_wkv","tiles":10240,"weights":2621440,"bit_exact":true}
+{"gate":"exhaustive_codebook","codebook":0,"states":65536,"bit_exact":true}
+{"gate":"exhaustive_codebook","codebook":1,"states":65536,"bit_exact":true}
+{"gate":"exhaustive_codebook","codebook":2,"states":65536,"bit_exact":true}

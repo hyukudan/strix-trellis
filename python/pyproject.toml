@@ -1,0 +1,15 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "strix-trellis"
+version = "0.3.0"
+description = "Independent CPU reference for EXL3 tile decoding"
+requires-python = ">=3.10"
+license = "Apache-2.0"
+dependencies = ["numpy>=1.24"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["strix_trellis*"]

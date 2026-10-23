@@ -15,7 +15,7 @@ The decode, GEMV, GEMM and transform kernels are written from scratch. See
 
 > **Status: experimental.** The C ABI is at version 1 and the library is at
 > 0.3.0. Some paths are qualified on hardware; newer paths are implemented and
-> pass CPU contract tests but have not yet been built or measured on the GPU.
+> pass CPU contract tests but have not yet been measured on the GPU.
 > The [status table](#status) separates the two.
 
 ## Target model
@@ -93,7 +93,9 @@ for one decoded token.
 | HIP runtime, dense GEMV R1–R8 and WMMA GEMM | **Qualified on hardware** (campaign V16, see [Measured performance](#measured-performance)). |
 | Prepared plans (`strix_linear_plan_*`) and region upload (`strix_weights_prepare_parts`) | Implemented in 0.2. CPU contract tests pass; GPU run pending. |
 | K2 R1 local-reduction kernel | Implemented, off by default (`STRIX_TRELLIS_BUILD_EXPERIMENTAL_K2_LOCAL`). GPU qualification pending. See [K2_LOCAL.md](docs/K2_LOCAL.md). |
-| TP rank APIs (`strix_tp_dense_*`, `strix_tp_moe_*`) | Implemented in 0.3, off by default (`STRIX_TRELLIS_ENABLE_EXPERIMENTAL_TP`). CPU contract tests pass; HIP build and GPU runs pending. See [TP_RANK.md](docs/TP_RANK.md). |
+| TP rank APIs (`strix_tp_dense_*`, `strix_tp_moe_*`) | Implemented in 0.3, off by default (`STRIX_TRELLIS_ENABLE_EXPERIMENTAL_TP`). CPU contract tests pass and the HIP build compiles. See [TP_RANK.md](docs/TP_RANK.md). |
+| K2 expert split plans, lean core (`strix_tp_moe_plan_create_split`, `STRIX_TRELLIS_TP_MOE_PIPELINED_K2`) | Experimental; the pipeline is off by default, and when enabled defaults to the measured configuration with the lean core. Bitwise equal to the 0.3 expert operator on GPU fixtures and to a lane-exact CPU reference; operator timings below. Full-model qualification pending. See [experimental-k2-lean.md](docs/experimental-k2-lean.md). |
+| K2 A8R expert arithmetic (`STRIX_TRELLIS_TP_MOE_A8R`) | Experimental, compiled out by default. A distinct arithmetic identity, **not** bitwise equal to the S4 path; not measured here. See [experimental-a8r.md](docs/experimental-a8r.md). |
 | Grouped MoE (`strix_grouped_moe`) | Works, one stream over groups; no performance work. |
 | Python HIP bindings | None. Python provides the reference and weight transport; C/C++ drives the GPU. |
 | Full model inference | Not provided. The library supplies linear operators to an inference engine. |
@@ -102,8 +104,9 @@ for one decoded token.
 
 ## Measured performance
 
-All numbers below come from qualification campaign **V16** (library built from
-commit `0e60746`, run on 2026-10-21). Later sources have not been re-measured.
+The dense GEMV and GEMM numbers below come from qualification campaign **V16**
+(run on 2026-10-21) of an earlier library build. The dense kernel sources are
+unchanged since that build; this exact revision has not been re-measured.
 
 **Hardware and software:** AMD Ryzen AI Max+ 395, Radeon 8060S GPU
 (`gfx1151`, 40 CU, wave32), 128 GB unified memory (AMD lists 256 GB/s
@@ -164,6 +167,49 @@ V4.1 Flash shapes with synthetic K2 weights and activations.
 - 9 CTest programs and 33 Python tests pass with no skips.
 - WMMA results are not bit-identical to scalar sums; the declared tolerances
   apply.
+
+### Experimental: K2 expert block, lean core (2026-10-23)
+
+Isolated operator timings of the TP expert block for one rank (K2 `mul1`
+gate/up `(5120, 1152)` and down `(1152, 5120)`, top-6 routes per row),
+submitted as a split plan. Both columns are our own builds of the same split
+pipeline; the only difference is `STRIX_TRELLIS_TP_MOE_LEAN_CORE`. The
+outputs of the two builds are identical byte for byte.
+
+**Method:** same hardware as above, ROCm 10.1, one process, alternating build
+pairs (at least three pairs per cell). Ranges are the medians of the pairs.
+*Hot*: fixed weight addresses. *Cold*: 256 MiB read between submissions so the
+expert weights are not cache resident. R1 ranges cover route patterns where
+rows select the same, partly the same, or different experts; R6 cells name
+the pattern.
+
+| Case | Base S4 µs | Lean core µs |
+|---|---:|---:|
+| R1, hot | 121–130 | 109.5–116.2 |
+| R1, cold | 158.3–159.3 | 153.6–155.6 |
+| R6, overlapping routes, hot | 521–542 | 512–527 |
+| R6, overlapping routes, cold | 502–508 | 499–503 |
+| R6, disjoint routes, cold | 770–773 | 759–765 |
+
+- The lean core lowers the main-loop VALU count from 45.1 to 40.3
+  instructions per 16×16 tile (ISA count) with the same arithmetic. It won all
+  18 cold R1 pairs.
+- `STRIX_TRELLIS_TP_MOE_DECLARED_SWIGLU` (changes H: clamped SwiGLU with an
+  exponential reproducible on the host) measured 154.7–155.1 µs cold and
+  114.6–118.4 µs hot at R1.
+- Build with `STRIX_TRELLIS_TP_MOE_PIPELINED_K2=ON`. Its defaults are the
+  measured configuration above, lean core included (`PREFETCH_ROWS=4`,
+  `ROW_CAP=2`, `SINGLE_DEPTH=8`, `DOWN_DEPTH=6`, `FUSE_DOWN_PREPARE`,
+  `ADAPTIVE_ROWS`, `GROUPED_FINISH`, `SPLIT_PREPARE`, `SPLIT_GATE_FINISH`,
+  `LEAN_CORE`; all `STRIX_TRELLIS_TP_MOE_*`, each can be switched off). The
+  pipeline itself stays off by default until it is compared case by case with
+  the non-pipelined split path. `STRIX_TRELLIS_TP_MOE_FOLD_R1` is exact but
+  slower and stays off.
+- Correctness: bitwise equal to the 0.3 expert operator on 24 K2 and 24 mixed
+  K2/K3 GPU fixtures (H, P, Y, graph replay, invalid routes, NaN). A lane-exact
+  CPU model of the S4 core reproduces the GPU P and Y bit for bit; its
+  `v_dot2acc_f32_f16` model has 0 mismatches on 7,340,032 native gfx1151 cases.
+- These are operator measurements only; no model throughput claim follows.
 
 ### Reproducing
 
@@ -279,8 +325,8 @@ and streams.
 
 ## Limitations
 
-- Experimental. Only the V16 paths are measured on hardware; 0.2 and 0.3
-  additions are CPU-tested only.
+- Experimental. Only the V16 paths and the K2 lean-core expert operator are
+  measured on hardware; the other 0.2 and 0.3 additions are CPU-tested only.
 - One GPU target: `gfx1151`. Other RDNA targets are untested.
 - No inter-rank communication: TP rank outputs of `o_b` and expert down must
   be summed by the caller. No complete generation engine.

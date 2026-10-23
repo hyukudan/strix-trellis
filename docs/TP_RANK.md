@@ -7,11 +7,13 @@ option disabled, the new functions, except initializers, return
 `STRIX_ERROR_NOT_IMPLEMENTED`. Normal GEMV/GEMM dispatch and the earlier grouped
 API retain their selection rules.
 
-**Status: implementation and CPU checks; HIP compilation, native
-correctness and performance checks are pending on the test machines (two
-Strix Halo systems).** The kernel, copy and memory counts described here are
-code properties and contracts checked by the native probe, not GPU results
-already obtained.
+**Status: implementation, CPU checks and HIP compilation. The K2 expert
+split plans with the lean core are qualified bitwise on the GPU and measured
+as an isolated operator (see the README and
+[experimental-k2-lean.md](experimental-k2-lean.md)); the other native
+correctness and performance checks are pending.** The kernel, copy and memory
+counts described here are code properties and contracts checked by the native
+probe, not GPU results already obtained.
 
 ## 1. Dense K4/K5, R1 to R8
 

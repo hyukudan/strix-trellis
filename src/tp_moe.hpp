@@ -46,12 +46,40 @@ struct TpMoeLaunch {
     unsigned bank_count = 0;
     const uint32_t* device_route_ids = nullptr;
     const float* device_route_scores = nullptr;
+    // Additive split3 variant: H remains at hidden; P follows it.
+    float* partials = nullptr;
+    unsigned persistent_grid = 0;
+    // Immutable plans classify at creation; device-bank plans must reclassify
+    // their mutable routes on the GPU for every submission.
+    unsigned gate_row_classes = 0, down_row_classes = 0;
+    // Plan-owned, zero-initialized arrival counters of the folded R1 path.
+    unsigned* fold_counters = nullptr;
 };
 
 // Creation-time check for the exact rows image and down image. It propagates
 // HIP errors and rejects images unable to launch their 512-thread blocks.
 hipError_t query_tp_moe_resources(unsigned rows, size_t device_shared_bytes,
     bool* supported);
+hipError_t query_tp_moe_split_resources(unsigned rows, size_t device_shared_bytes,
+    bool* supported);
+hipError_t query_tp_moe_persistent_grid(unsigned rows, unsigned compute_units, unsigned* grid);
+hipError_t launch_tp_moe_split_full(const TpMoeLaunch&, hipStream_t);
+hipError_t launch_tp_moe_split_gate_up(const TpMoeLaunch&, hipStream_t);
+hipError_t launch_tp_moe_split_core(const TpMoeLaunch&, hipStream_t);
+hipError_t launch_tp_moe_split_finish(const TpMoeLaunch&, hipStream_t);
+// Qualification only: original two-phase S4 tree exported before finishing.
+hipError_t launch_tp_moe_reference_partials(const TpMoeLaunch&, hipStream_t);
+const void* tp_moe_split_function(unsigned stage, unsigned rows);
+// Distinct opt-in identity; the original and split S4 creators never use it.
+hipError_t query_tp_moe_a8r_resources(unsigned rows, size_t device_shared_bytes, bool* supported);
+const void* tp_moe_a8r_function(unsigned stage, unsigned rows);
+hipError_t launch_tp_moe_a8r_gate_up(const TpMoeLaunch&, hipStream_t);
+hipError_t launch_tp_moe_a8r_core(const TpMoeLaunch&, hipStream_t);
+hipError_t launch_tp_moe_a8r_finish(const TpMoeLaunch&, hipStream_t);
+hipError_t launch_tp_moe_a8r_full(const TpMoeLaunch&, hipStream_t);
+// Diagnostic proxy for redundant device-owner resolution at the B grid.
+hipError_t launch_tp_moe_route_probe(unsigned rows, unsigned bank_count,
+    const uint32_t* ids, const float* scores, uint32_t* output, hipStream_t);
 // No allocation, table upload, host route loop, synchronization or adapter copy.
 hipError_t launch_tp_moe_gate_up(const TpMoeLaunch&, hipStream_t);
 hipError_t launch_tp_moe_down(const TpMoeLaunch&, hipStream_t);

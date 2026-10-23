@@ -6,6 +6,43 @@ Source versions follow `STRIX_TRELLIS_VERSION_*` in
 below compare one of our builds with the previous one, measured in the same
 session on the same machine.
 
+## Unreleased — 2026-10-23
+
+- K2 expert split plans (`strix_tp_moe_split_workspace_bytes`,
+  `strix_tp_moe_plan_create_split`, `strix_tp_moe_plan_create_device_split`,
+  staged `down_core` / `down_finish`): three-stage S4 expert block with an
+  optional pretransformed pipeline (`STRIX_TRELLIS_TP_MOE_PIPELINED_K2`).
+  The existing creators keep the two-kernel 0.3 implementation.
+- `STRIX_TRELLIS_TP_MOE_LEAN_CORE`: single-row K2 S4 core with wave-uniform
+  bases, 32-bit lane offsets and a select-free lane window; 45.1 → 40.3 VALU
+  per 16×16 tile, same bits. Isolated operator, one rank, against the same
+  pipeline without it: R1 hot 121–130 → 109.5–116.2 µs, R1 cold
+  158.3–159.3 → 153.6–155.6 µs, R6 disjoint cold 770–773 → 759–765 µs
+  (method in the README).
+- `STRIX_TRELLIS_TP_MOE_DECLARED_SWIGLU`: clamped SwiGLU with a host-reproducible
+  exponential (changes H). `STRIX_TRELLIS_TP_MOE_FOLD_R1`: exact last-CTA
+  finishes; slower, off.
+- Host references (header only): `src/dot2acc_reference.hpp` models native
+  gfx11 `v_dot2(acc)_f32_f16` (0 mismatches on 7,340,032 gfx1151 cases);
+  `src/tp_moe_s4_reference.hpp` is a lane-exact CPU model of the S4 core,
+  bitwise equal to the GPU for P and Y (and H with the declared SwiGLU).
+- Experimental K2 A8R expert arithmetic (`STRIX_TRELLIS_TP_MOE_A8R`, compiled
+  out by default): a distinct identity, not bitwise equal to S4. Not measured.
+- Defaults: the pretransformed pipeline (`STRIX_TRELLIS_TP_MOE_PIPELINED_K2`)
+  is OFF, so default builds select the same kernels and bits as 0.3.0. When it
+  is ON, its options default to the measured exact configuration
+  (`LEAN_CORE`, `ADAPTIVE_ROWS`, `GROUPED_FINISH`, `SPLIT_PREPARE`,
+  `SPLIT_GATE_FINISH`, `FUSE_DOWN_PREPARE`, `PREFETCH_ROWS=4`, `ROW_CAP=2`,
+  `SINGLE_DEPTH=8`, `DOWN_DEPTH=6`); each keeps its flag. Options that change
+  bits (`DECLARED_SWIGLU`, A8R) or were slower somewhere (`FOLD_R1`) stay OFF. CPU CTest 18/18, Python 61 tests (3 skipped without the
+  external fixture), HIP build for `gfx1151` with default and recommended
+  options.
+- CPU reference: `unpack_states_vectorized` and `dequantize_rotated_vectorized`,
+  array forms of the scalar decoder with identical output (about 6 M weights/s
+  on one CPU process instead of a Python loop per tile).
+- Loader: opt-in raw BF16 mapping (`tensor(name, raw_bf16=True)`) and
+  `tensor_float32(name)` for unquantized BF16/F16/F32 tensors.
+
 ## 0.3.0 — 2026-10-21 — TP rank paths (experimental, not yet GPU-qualified)
 
 - Dense TP API (`strix_tp_dense_plan_*`): per-rank K4/K5 `mul1` projections

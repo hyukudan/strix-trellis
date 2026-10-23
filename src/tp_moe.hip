@@ -1,7 +1,9 @@
 // Independent expert-TP SwiGLU: grouped gate/up and deterministic top-6 down.
 #include "tp_moe.hpp"
+#include "tp_moe_activation.hpp"
 #include "tp_moe_policy.hpp"
 #include "tp_moe_routes.hpp"
+#include "tp_moe_split_layout.hpp"
 #include "tp_fused_device.hpp"
 #include <cmath>
 
@@ -36,13 +38,9 @@ struct UpAccess {
     __device__ __forceinline__ void store_output(int row, int column, float value) const {
         if (unsigned(row) >= mapping.row_count) return;
         const float g = gate[row * 128 + (column & 127)];
-        // Stable sigmoid evaluation avoids exp(-g) overflow for negative g.
-        const float e = expf(g < 0.0f ? g : -g);
-        const float sigmoid = g < 0.0f ? e / (1.0f + e) : 1.0f / (1.0f + e);
-        const float activated = materialize_fp32(g * sigmoid);
         const uint64_t route = uint64_t(mapping.token_rows[row]) * tp_moe_top_k +
             mapping.route_slots[row];
-        launch.hidden[route * tp_moe_hidden + column] = materialize_fp32(activated * value);
+        launch.hidden[route * tp_moe_hidden + column] = tp_moe_swiglu(g, value);
     }
 };
 
@@ -165,6 +163,27 @@ __global__ __launch_bounds__(512) void down_kernel(TpMoeLaunch launch) {
     }
 }
 
+struct ReferenceAccess {
+    const float* input;
+    __device__ __forceinline__ float load_input(int, int column) const { return input[column]; }
+    __device__ __forceinline__ void store_output(int, int, float) const {}
+};
+__global__ __launch_bounds__(512) void reference_partials_kernel(TpMoeLaunch l) {
+    __shared__ float p[4 * 128];
+    __shared__ _Float16 cache[2 * 128];
+    const unsigned row = blockIdx.y / 6, slot = blockIdx.y % 6;
+    const auto* ids = l.bank ? l.device_route_ids + row * 6 : l.table->expert_indices[row];
+    const auto* scores = l.bank ? l.device_route_scores + row * 6 : l.table->route_scores[row];
+    if (l.bank && !tp_moe_device_row_valid(ids, scores, l.bank_count)) return;
+    if (scores[slot] == 0.0f) return;
+    const auto& w = l.bank ? l.bank[ids[slot]].down : l.table->experts[ids[slot]].down;
+    ReferenceAccess a{l.hidden + (uint64_t(row) * 6 + slot) * 1152};
+    if (w.bits == 2) tp_fused::project<2,1>(w, a, blockIdx.x, p, cache);
+    else tp_fused::project<3,1>(w, a, blockIdx.x, p, cache);
+    const unsigned split = threadIdx.x / 128, column = threadIdx.x % 128;
+    l.partials[tp_moe_split_index(row,slot,split,blockIdx.x*128+column)] = p[split*128+column];
+}
+
 const void* gate_function(unsigned rows) {
     if (rows == 1) return reinterpret_cast<const void*>(gate_up_kernel<1>);
     if (rows == 2) return reinterpret_cast<const void*>(gate_up_kernel<2>);
@@ -184,6 +203,11 @@ bool launch_valid(const TpMoeLaunch& l) {
 }
 
 namespace strix_trellis {
+hipError_t launch_tp_moe_reference_partials(const TpMoeLaunch& l, hipStream_t stream) {
+    if (!l.partials || !tp_moe_detail::launch_valid(l)) return hipErrorInvalidValue;
+    tp_moe_detail::reference_partials_kernel<<<dim3(40,l.rows*6),512,0,stream>>>(l);
+    return hipGetLastError();
+}
 hipError_t query_tp_moe_resources(unsigned rows, size_t available, bool* supported) {
     if (!supported || rows < 1 || rows > 8) return hipErrorInvalidValue;
     *supported = false;

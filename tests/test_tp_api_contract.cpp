@@ -7,7 +7,7 @@
 #include <limits>
 
 namespace tp_fake {
-int resource_error = 0, dense_error = 0, gate_error = 0, down_error = 0;
+int resource_error = 0, dense_error = 0, gate_error = 0, down_error = 0, core_error = 0, finish_error = 0;
 bool supported = true;
 unsigned dense_resources = 0, moe_resources = 0, dense_calls = 0, gate_calls = 0, down_calls = 0;
 int resource_bits = 0, resource_rows = 0;
@@ -29,6 +29,24 @@ hipError_t query_tp_moe_resources(unsigned rows, size_t shared, bool* supported)
     assert(shared == fake::shared_bytes && rows >= 1 && rows <= 8);
     *supported = tp_fake::supported;
     return tp_fake::resource_error;
+}
+hipError_t query_tp_moe_split_resources(unsigned rows, size_t shared, bool* supported) {
+    return query_tp_moe_resources(rows, shared, supported);
+}
+hipError_t launch_tp_moe_split_gate_up(const TpMoeLaunch& args, hipStream_t stream) {
+    ++fake::launches; tp_fake::moe = args; fake::last_stream = stream;
+    tp_fake::order.push_back('A'); return tp_fake::gate_error;
+}
+hipError_t launch_tp_moe_split_core(const TpMoeLaunch& args, hipStream_t stream) {
+    ++fake::launches; tp_fake::moe = args; fake::last_stream = stream;
+    tp_fake::order.push_back('B'); return tp_fake::core_error;
+}
+hipError_t launch_tp_moe_reference_partials(const TpMoeLaunch& args, hipStream_t stream) {
+    return launch_tp_moe_split_core(args, stream);
+}
+hipError_t launch_tp_moe_split_finish(const TpMoeLaunch& args, hipStream_t stream) {
+    ++fake::launches; tp_fake::moe = args; fake::last_stream = stream;
+    tp_fake::order.push_back('C'); return tp_fake::finish_error;
 }
 hipError_t launch_tp_dense_trusted(const TpDenseArguments& args, hipStream_t stream) {
     ++tp_fake::dense_calls; ++fake::launches;
@@ -552,9 +570,98 @@ void device_moe_negative(Environment& env, const std::vector<strix_weights>& wei
         for (auto w : weights) assert(w->plan_refs == 0);
     }
 }
+void split_contract(Environment& env, const std::vector<strix_weights>& weights) {
+    for (unsigned rows = 1; rows <= 8; ++rows) {
+        MoeCase m(rows, rows * 6, weights);
+        Buffer workspace(size_t(rows) * 519168);
+        uint64_t bytes = 0;
+        Counters query;
+        assert(strix_tp_moe_split_workspace_bytes(env.context, &m.d, &bytes) == STRIX_SUCCESS);
+        assert(bytes == workspace.bytes); query.no_work();
+        m.d.workspace = workspace.pointer; m.d.workspace_bytes = workspace.bytes;
+        const auto good = m.d;
+        auto reject = [&](strix_status expected) {
+            Counters before; strix_tp_moe_plan p = nullptr;
+            assert(strix_tp_moe_plan_create_split(env.context, &m.d, &env.stream, &p) == expected && !p);
+            before.no_work(); m.d = good;
+        };
+        m.d.workspace_bytes--; reject(STRIX_ERROR_INSUFFICIENT_BUFFER);
+        m.d.workspace = workspace.at(4); reject(STRIX_ERROR_INVALID_ARGUMENT);
+        m.d.workspace = reinterpret_cast<void*>(UINTPTR_MAX - 255); reject(STRIX_ERROR_INVALID_ARGUMENT);
+        m.d.workspace = m.x.pointer; reject(STRIX_ERROR_INVALID_ARGUMENT);
+        m.d.workspace = m.y.pointer; reject(STRIX_ERROR_INVALID_ARGUMENT);
+        m.d.workspace = weights[0]->allocation; reject(STRIX_ERROR_INVALID_ARGUMENT);
+        // Alias in P, after H, must be rejected as well as overlap in H.
+        m.d.input.data = workspace.at(size_t(rows) * 27648); reject(STRIX_ERROR_INVALID_ARGUMENT);
+        tp_fake::supported = false; reject(STRIX_ERROR_UNSUPPORTED_DEVICE); tp_fake::supported = true;
+        strix_tp_moe_plan p = nullptr;
+        assert(strix_tp_moe_plan_create_split(env.context, &m.d, &env.stream, &p) == STRIX_SUCCESS);
+        assert(p->arguments.partials == static_cast<float*>(workspace.pointer) + rows * 6 * 1152);
+        Counters before;
+        auto start = tp_fake::order.size();
+        assert(strix_tp_moe_plan_submit(p) == STRIX_SUCCESS);
+        assert(std::vector<char>(tp_fake::order.begin() + start, tp_fake::order.end()) == std::vector<char>({'A','B','C'}));
+        assert(strix_tp_moe_plan_gate_up(p) == STRIX_SUCCESS);
+        assert(strix_tp_moe_plan_down(p) == STRIX_SUCCESS);
+        assert(strix_tp_moe_plan_down_core(p) == STRIX_SUCCESS);
+        assert(strix_tp_moe_plan_down_finish(p) == STRIX_SUCCESS);
+        before.hot_path(8);
+        for (unsigned failure = 0; failure < 3; ++failure) {
+            Counters failed;
+            tp_fake::gate_error = failure == 0 ? 99 : 0;
+            tp_fake::core_error = failure == 1 ? 99 : 0;
+            tp_fake::finish_error = failure == 2 ? 99 : 0;
+            start = tp_fake::order.size();
+            assert(strix_tp_moe_plan_submit(p) == STRIX_ERROR_BACKEND);
+            failed.hot_path(int(failure) + 1);
+            assert(tp_fake::order.size() - start == failure + 1);
+        }
+        tp_fake::gate_error = tp_fake::core_error = tp_fake::finish_error = 0;
+        assert(strix_tp_moe_plan_destroy(p) == STRIX_SUCCESS);
+        DeviceMoeCase device(rows, 256, weights);
+        device.d.workspace = workspace.pointer; device.d.workspace_bytes = workspace.bytes;
+        const auto valid_device = device.d;
+        auto reject_device = [&](strix_status expected) {
+            Counters rejected;
+            assert(strix_tp_moe_plan_create_device_split(env.context, &device.d, &env.stream, &p) == expected && !p);
+            rejected.no_work(); device.d = valid_device;
+        };
+        device.d.workspace_bytes--; reject_device(STRIX_ERROR_INSUFFICIENT_BUFFER);
+        device.d.workspace = workspace.at(4); reject_device(STRIX_ERROR_INVALID_ARGUMENT);
+        device.d.route_ids = reinterpret_cast<uint32_t*>(workspace.at(size_t(rows) * 27648));
+        reject_device(STRIX_ERROR_INVALID_ARGUMENT);
+        device.d.route_scores = reinterpret_cast<float*>(workspace.at(workspace.bytes - rows * 24));
+        reject_device(STRIX_ERROR_INVALID_ARGUMENT);
+        assert(strix_tp_moe_plan_create_device_split(env.context, &device.d, &env.stream, &p) == STRIX_SUCCESS);
+        Counters submitted;
+        assert(strix_tp_moe_plan_submit(p) == STRIX_SUCCESS); submitted.hot_path(3);
+        assert(strix_tp_moe_plan_destroy(p) == STRIX_SUCCESS);
+        for (auto w : weights) assert(w->plan_refs == 0);
+    }
+    assert(strix_tp_moe_plan_down_core(nullptr) == STRIX_ERROR_INVALID_ARGUMENT);
+    assert(strix_tp_moe_plan_down_finish(nullptr) == STRIX_ERROR_INVALID_ARGUMENT);
+}
 } // namespace
 
+#ifdef STRIX_TP_API_NO_MAIN
+int tp_api_contract_main() {
+#else
 int main() {
+#endif
+    // Compiling the optional identity out must neither select it implicitly
+    // nor allocate/retain anything through its additive public creators.
+#ifndef STRIX_TRELLIS_TP_MOE_A8R
+    {
+        Counters idle;
+        strix_tp_moe_plan p = reinterpret_cast<strix_tp_moe_plan>(uintptr_t(1));
+        assert(strix_tp_moe_plan_create_a8r(nullptr, nullptr, nullptr, &p) == STRIX_ERROR_NOT_IMPLEMENTED && !p);
+        p = reinterpret_cast<strix_tp_moe_plan>(uintptr_t(1));
+        assert(strix_tp_moe_plan_create_device_a8r(nullptr, nullptr, nullptr, &p) == STRIX_ERROR_NOT_IMPLEMENTED && !p);
+        assert(strix_tp_moe_plan_create_a8r(nullptr, nullptr, nullptr, nullptr) == STRIX_ERROR_INVALID_ARGUMENT);
+        assert(strix_tp_moe_plan_create_device_a8r(nullptr, nullptr, nullptr, nullptr) == STRIX_ERROR_INVALID_ARGUMENT);
+        idle.no_work();
+    }
+#endif
     dense_positive(); dense_negative();
     {
         Environment env;
@@ -562,10 +669,12 @@ int main() {
             prepare(env, 5120, 1152, 2), prepare(env, 5120, 1152, 3),
             prepare(env, 1152, 5120, 2), prepare(env, 1152, 5120, 3)};
         moe_positive(env, weights); moe_negative(env, weights);
+        split_contract(env, weights);
         device_moe_positive(env, weights); device_moe_negative(env, weights);
         for (auto w : weights) assert(strix_weights_destroy(w) == STRIX_SUCCESS);
     }
     assert(fake::buffers.empty());
     std::cout << "TP CPU API contract passed: dense 432 tiled plans, 176 exact MoE unions, "
-                 "18 device banks through 256 experts; mock HIP only.\n";
+                 "18 device banks through 256 experts; split3 R1..R8 and A/B/C error stops; mock HIP only.\n";
+    return 0;
 }

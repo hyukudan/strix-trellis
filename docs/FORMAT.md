@@ -112,6 +112,7 @@ Install with `python -m pip install --no-build-isolation --no-deps -e ./python`
 | `decode_states(states, codebook="mul1")` | Integer states → float16 |
 | `decode_tile(packed, k, codebook="mul1")` | Words → logical `[..., 16, 16]` |
 | `dequantize_rotated(trellis, k=None, codebook="mul1")` | 3D trellis → float16 matrix; K inferred from the last dimension |
+| `unpack_states_vectorized(packed, k, chunk_tiles=8192)` / `dequantize_rotated_vectorized(...)` | Array forms of `unpack_states` / `dequantize_rotated` with bounded memory; bit-identical output (tests compare them with the scalar reference at every rate and codebook) |
 | `hadamard(values, block_size=128, axis=-1)` | Normalized float64 transform |
 | `reconstruct_weight(trellis, suh, svh, k=None, codebook="mul1")` | Original float64 matrix `[input, output]` |
 | `matmul(x, trellis, suh, svh, k=None, codebook="mul1", bias=None)` | `x[..., input]` → float64 `y[..., output]` |

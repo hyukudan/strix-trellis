@@ -11,6 +11,8 @@ from .codec import step_widths
 from .linear import matmul, matmul_fp32
 
 _DTYPES = {"I16": "<i2", "I32": "<i4", "F16": "<f2", "F32": "<f4"}
+# BF16 has no NumPy dtype: it is mapped as raw little-endian uint16 bit patterns.
+_RAW_DTYPES = {"BF16": "<u2"}
 _MARKERS = {"3inst": 0, "mcg": 0xCBAC1FED, "mul1": 0x83DCD12D}
 _TRANSPORT_PARTS = (("trellis", np.dtype("<i2")), ("suh", np.dtype("<f2")),
                     ("svh", np.dtype("<f2")), ("bias", np.dtype("<f4")))
@@ -48,9 +50,11 @@ class SafetensorsFile:
             raise ValueError("Safetensors header must be an object")
         self.data_offset = 8 + header_bytes
 
-    def tensor(self, name):
+    def tensor(self, name, *, raw_bf16=False):
+        """Map one tensor; BF16 is accepted only with raw_bf16=True (uint16 bits)."""
         info = self.header.get(name)
-        if not isinstance(info, dict) or info.get("dtype") not in _DTYPES:
+        dtypes = {**_DTYPES, **_RAW_DTYPES} if raw_bf16 else _DTYPES
+        if not isinstance(info, dict) or info.get("dtype") not in dtypes:
             raise ValueError(f"Missing tensor or unsupported dtype: {name}")
         shape, offsets = info.get("shape"), info.get("data_offsets")
         if (not isinstance(shape, list) or len(shape) > 8 or
@@ -59,7 +63,7 @@ class SafetensorsFile:
                 any(type(x) is not int for x in offsets)):
             raise ValueError(f"Invalid tensor shape or offsets: {name}")
         begin, end = offsets
-        dtype = np.dtype(_DTYPES[info["dtype"]])
+        dtype = np.dtype(dtypes[info["dtype"]])
         if not 0 <= begin <= end <= self.file_bytes - self.data_offset:
             raise ValueError(f"Tensor range exceeds file: {name}")
         if math.prod(shape) * dtype.itemsize != end - begin:
@@ -70,6 +74,16 @@ class SafetensorsFile:
             return result
         return np.memmap(self.path, mode="r", dtype=dtype,
                          offset=self.data_offset + begin, shape=tuple(shape))
+
+    def tensor_float32(self, name):
+        """Copy an unquantized BF16/F16/F32 tensor to float32 (exact widening)."""
+        dtype = self.header.get(name, {}).get("dtype") if isinstance(self.header.get(name), dict) else None
+        raw = self.tensor(name, raw_bf16=True)
+        if dtype == "BF16":
+            return (raw.astype(np.uint32) << 16).view(np.float32)
+        if dtype in ("F16", "F32"):
+            return np.asarray(raw, dtype=np.float32)
+        raise ValueError(f"Not a floating tensor: {name}")
 
     def exl3(self, prefix):
         return load_exl3(self, prefix)

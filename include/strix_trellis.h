@@ -329,6 +329,50 @@ strix_status strix_tp_moe_plan_create(strix_context context,
 strix_status strix_tp_moe_plan_create_device(strix_context context,
     const strix_tp_moe_device_desc *desc, const strix_stream *stream,
     strix_tp_moe_plan *out);
+/* Explicit split3 variant. ABI 1 descriptors and handles are unchanged.
+ * Workspace: H[R,6,1152] followed by P[R,6,4,5120], F32, 256-byte aligned;
+ * minimum 519168*R bytes, or 642048*R with the pretransformed pipeline build.
+ * Query the required size; no memset or arrival counters are required.
+ * submit: A->B->C; the optional pipeline expands A to prepare/core/finish
+ * and B to prepare/core (six kernel nodes in total). The optional fused
+ * full-submit epilogue prepares down in A, using five nodes; staged calls
+ * still prepare caller-provided H independently. Prepared owner maps add
+ * 8192 bytes per workspace. The cooperative experimental build submits full
+ * as one occupancy-admitted kernel, with the same staged entry points.
+ * Adaptive rows can split each core by device-resolved row count. Immutable
+ * plans omit empty classes using creation-time routing metadata. Parallel
+ * finish expands C into route epilogues and an ordered combine, reusing dead
+ * activation scratch without changing H, P or workspace size.
+ * Query workspace size from the loaded library for every optional build.
+ * The original creators continue to select the two-kernel 0.3 implementation.
+ * All existing lifetime, routing, alias and enqueue-error contracts apply. */
+strix_status strix_tp_moe_split_workspace_bytes(strix_context context,
+    const strix_tp_moe_desc *desc, uint64_t *out_bytes);
+strix_status strix_tp_moe_plan_create_split(strix_context context,
+    const strix_tp_moe_desc *desc, const strix_stream *stream,
+    strix_tp_moe_plan *out);
+strix_status strix_tp_moe_plan_create_device_split(strix_context context,
+    const strix_tp_moe_device_desc *desc, const strix_stream *stream,
+    strix_tp_moe_plan *out);
+/* Explicit new identity: K2 mul1 affine weights, rotated A8 groups of32,
+ * integer group accumulation, fixed RN32 group/S4 reduction and deterministic
+ * SiLU. This is NOT the original S4/DOT2ACC arithmetic. Only K2/mul1 weights
+ * are admitted. Build with STRIX_TRELLIS_TP_MOE_A8R (OFF by default), then
+ * query split workspace size from that library. Original creators never
+ * select A8R, even in an A8R-enabled build. Existing stream/lifetime rules
+ * and staged entry points apply; down_reference_core rejects A8R plans. */
+strix_status strix_tp_moe_plan_create_a8r(strix_context context,
+    const strix_tp_moe_desc *desc, const strix_stream *stream,
+    strix_tp_moe_plan *out);
+strix_status strix_tp_moe_plan_create_device_a8r(strix_context context,
+    const strix_tp_moe_device_desc *desc, const strix_stream *stream,
+    strix_tp_moe_plan *out);
+/* Diagnostic staged B and C entry points require a split3 plan. P is consumed
+ * directly from the workspace, allowing independent S4 checkpoint validation. */
+strix_status strix_tp_moe_plan_down_core(strix_tp_moe_plan plan);
+strix_status strix_tp_moe_plan_down_finish(strix_tp_moe_plan plan);
+/* Qualification control: original two-phase S4 down core, exporting P only. */
+strix_status strix_tp_moe_plan_down_reference_core(strix_tp_moe_plan plan);
 strix_status strix_tp_moe_plan_submit(strix_tp_moe_plan plan);
 /* Staged entry points share the same frozen plan. down reads the hidden
  * workspace from the latest gate_up (or caller-provided equivalent values).

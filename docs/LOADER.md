@@ -18,6 +18,11 @@ y = weights.matmul(x, production=True)  # CPU reference; this is not the HIP pat
 blob, metadata_fields = weights.transport_blob()
 ```
 
+Unquantized BF16 tensors (embeddings, norms) have no NumPy dtype: `tensor(name)`
+rejects them unless `raw_bf16=True`, which maps the raw little-endian bit patterns as
+uint16. `tensor_float32(name)` copies a BF16, F16 or F32 tensor to float32 (an exact
+widening). EXL3 groups never contain BF16 regions.
+
 ## Preparation without an intermediate blob
 
 To pass the four regions to the native preparation function without building a

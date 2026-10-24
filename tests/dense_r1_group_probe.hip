@@ -217,6 +217,8 @@ double timed(Runtime& rt, const std::function<void(int)>& call, int copies, int 
     std::vector<double> v;
     const char* sw = std::getenv("PROBE_SWEEPS");  // timed sweeps after one discarded sweep (default 7)
     const int sweeps = sw ? std::max(1, std::atoi(sw)) : 7;
+    // Whole rotations: every copy is visited the same number of times in each sweep.
+    repeats = copies * std::max(1, (repeats + copies - 1) / copies);
     for (int s = -1; s < sweeps; ++s) {
         hip_ok(hipEventRecord(b, rt.stream));
         for (int k = 0; k < repeats; ++k) call(k % copies);
@@ -237,7 +239,9 @@ int tune(int bits, const std::vector<int>& row_list) {
     const char* rot = std::getenv("PROBE_ROTATE_MB");
     const size_t group_bytes = size_t(G) * I * N * bits / 8;
     const int copies = rot ? int(std::max<size_t>(8, (size_t(std::atoi(rot)) << 20) / group_bytes + 1)) : 8;
-    std::printf("GROUP_ROTATION bits=%d copies=%d bytes=%zu\n", bits, copies, size_t(copies) * group_bytes);
+    const int calls = copies * std::max(1, (64 + copies - 1) / copies);
+    std::printf("GROUP_ROTATION bits=%d copies=%d bytes=%zu calls_per_sweep=%d visited_bytes_per_sweep=%zu\n", bits, copies,
+                size_t(copies) * group_bytes, calls, size_t(calls) * group_bytes);
     std::vector<std::unique_ptr<Weight>> ws;
     for (int c = 0; c < copies * G; ++c) ws.push_back(std::make_unique<Weight>(rt, bits, uint32_t(c + 1)));
     const uint64_t gb = generic_bytes(rt, ws[0]->handle);
@@ -260,6 +264,13 @@ int tune(int bits, const std::vector<int>& row_list) {
             }
         // baselines
         Buffer xc(size_t(G) * rows * I * 4);
+        {
+            std::vector<float> staged(size_t(G) * rows * I);
+            for (int g = 0; g < G; ++g)
+                for (int r = 0; r < rows; ++r)
+                    std::memcpy(staged.data() + (size_t(g) * rows + r) * I, hx.data() + size_t(r) * xrs + size_t(g) * I, size_t(I) * 4);
+            xc.upload(staged.data(), xc.bytes);
+        }
         const double t_gemv = timed(rt, [&](int c) {
             for (int g = 0; g < G; ++g) gemv(rt, ws[size_t(c * G + g)]->handle, xc.f() + size_t(g) * rows * I, I, ref.f() + size_t(g) * rows * N, rows, gws.data, gb);
         }, copies, 64);
@@ -287,12 +298,17 @@ int tune(int bits, const std::vector<int>& row_list) {
         std::printf("GROUP_POLICY bits=%d rows=%d pipe=%d cols=%d outs=%d u=%d\n", bits, rows, pol_pipe ? 1 : 0, pol.columns,
                     pol.outputs_per_wave, pol.prefetch);
         const bool policy_only = std::getenv("PROBE_POLICY_ONLY") != nullptr;
+        std::vector<unsigned char> policy_bytes;  // output of the shipped schedule on copy 0
+        int measured = 0, unsupported = 0, exact_count = 0;
+        std::printf("GROUP_SCOPE bits=%d rows=%d exact=copy0_before_and_after_timing_vs_rowwise_strix_gemv_and_shipped_schedule_bytes\n", bits, rows);
+        for (int pass = 0; pass < 2; ++pass)  // pass 0: the shipped schedule only (records its bytes); pass 1: the sweep
         for (int pipe : {0, 1})
         for (int cols : {16, 32, 64, 128})
             for (int outs : {16, 8})
                 for (int u : {1, 2, 4}) {
-                    if (policy_only && (pipe != (pol_pipe ? 1 : 0) || cols != pol.columns || outs != pol.outputs_per_wave || u != pol.prefetch))
-                        continue;
+                    const bool is_policy = pipe == (pol_pipe ? 1 : 0) && cols == pol.columns && outs == pol.outputs_per_wave && u == pol.prefetch;
+                    if (pass == 0 && !is_policy) continue;
+                    if (pass == 1 && policy_only && !is_policy) continue;
                     std::vector<DenseR1Group> grp(copies);
                     for (int c = 0; c < copies; ++c)
                         for (int g = 0; g < G; ++g) {
@@ -306,18 +322,33 @@ int tune(int bits, const std::vector<int>& row_list) {
                         }
                     bool supported = false;
                     hip_ok(query_dense_r1_group_resources(grp[0].member[0], 65536, &supported));
-                    if (!supported) { std::printf("GROUP_SCHED bits=%d rows=%d pipe=%d cols=%d outs=%d u=%d unsupported\n", bits, rows, pipe, cols, outs, u); continue; }
+                    if (!supported) {
+                        if (pass == 1) { ++unsupported; std::printf("GROUP_SCHED bits=%d rows=%d pipe=%d cols=%d outs=%d u=%d unsupported\n", bits, rows, pipe, cols, outs, u); }
+                        continue;
+                    }
+                    if (pass == 0) {
+                        hip_ok(hipMemset(y.data, 0xa5, y.bytes)); hip_ok(hipDeviceSynchronize());
+                        hip_ok(launch_dense_r1_group_trusted(grp[0], G, rt.stream)); hip_ok(hipStreamSynchronize(rt.stream));
+                        policy_bytes = y.download();
+                        continue;
+                    }
                     hip_ok(hipMemset(y.data, 0xa5, y.bytes)); hip_ok(hipDeviceSynchronize());
                     hip_ok(launch_dense_r1_group_trusted(grp[0], G, rt.stream)); hip_ok(hipStreamSynchronize(rt.stream));
                     const bool exact = y.download() == expect;
                     const double t = timed(rt, [&](int c) { hip_ok(launch_dense_r1_group_trusted(grp[size_t(c)], G, rt.stream)); }, copies, 64);
                     hip_ok(launch_dense_r1_group_trusted(grp[0], G, rt.stream)); hip_ok(hipStreamSynchronize(rt.stream));
-                    const bool exact2 = y.download() == expect;
-                    if (!exact || !exact2) ++failures;
-                    std::printf("GROUP_SCHED bits=%d rows=%d pipe=%d cols=%d outs=%d u=%d us=%.2f GBps=%.1f %s\n", bits, rows, pipe, cols, outs, u, t,
-                                double(G) * I * N * bits / 8 / (t * 1e3), exact && exact2 ? "EXACT" : "DIFF");
-                    if (exact && exact2 && t < best) { best = t; best_s = std::to_string(cols) + "," + std::to_string(u) + "," + std::to_string(outs) + (pipe ? ",pipe" : ""); }
+                    const auto after = y.download();
+                    const bool exact2 = after == expect, same_policy = after == policy_bytes;
+                    if (!exact || !exact2 || !same_policy) ++failures;
+                    ++measured; exact_count += exact && exact2 && same_policy;
+                    // Scope: copy 0, before and after timing, vs row-by-row strix_gemv and vs the shipped schedule's bytes.
+                    std::printf("GROUP_SCHED bits=%d rows=%d pipe=%d cols=%d outs=%d u=%d us=%.2f GBps=%.1f %s policy=%d%s\n", bits, rows, pipe, cols, outs, u, t,
+                                double(G) * I * N * bits / 8 / (t * 1e3), exact && exact2 && same_policy ? "EXACT" : "DIFF", same_policy ? 1 : 0,
+                                is_policy ? " shipped" : "");
+                    if (exact && exact2 && same_policy && t < best) { best = t; best_s = std::to_string(cols) + "," + std::to_string(u) + "," + std::to_string(outs) + (pipe ? ",pipe" : ""); }
                 }
+        std::printf("GROUP_SWEEP bits=%d rows=%d measured=%d unsupported=%d exact=%d policy_recorded=%d\n", bits, rows, measured, unsupported,
+                    exact_count, policy_bytes.empty() ? 0 : 1);
         std::printf("GROUP_BEST bits=%d rows=%d sched={%s} us=%.2f vs linplan4 %.2f gemv4 %.2f\n", bits, rows, best_s.c_str(), best, t_plan, t_gemv);
         std::fflush(stdout);
     }

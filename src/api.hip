@@ -573,3 +573,6 @@ strix_status strix_grouped_moe(strix_context c, const strix_grouped_moe_desc* d,
 } // extern "C"
 
 #include "tp_api.inc"
+#include "tp_split_api.inc"
+#include "dense_r1_api.inc"
+#include "dense_r1_group_api.inc"

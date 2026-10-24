@@ -1,4 +1,6 @@
+#ifndef STRIX_TRELLIS_TP_MOE_PIPELINED_K2
 #define STRIX_TRELLIS_TP_MOE_PIPELINED_K2 1
+#endif
 #include "../src/tp_moe_split_layout.hpp"
 #include <algorithm>
 #include <cassert>
@@ -9,16 +11,31 @@ using namespace strix_trellis;
 int main() {
     static_assert(tp_moe_split_gate_nodes == 3 + tp_moe_route_nodes);
     static_assert(tp_moe_split_core_nodes == 2 + tp_moe_route_nodes);
+#ifdef STRIX_TRELLIS_TP_MOE_FUSE_DOWN_PREPARE
+    static_assert(tp_moe_split_nodes == 5 + tp_moe_route_nodes);
+#else
     static_assert(tp_moe_split_nodes == 6 + 2 * tp_moe_route_nodes);
+#endif
+#ifdef STRIX_TRELLIS_TP_MOE_DEVICE_ROUTE_MAPS
+    static_assert(tp_moe_device_route_nodes == 1 && tp_moe_route_nodes == 0);
+#else
+    static_assert(tp_moe_device_route_nodes == 0);
+#endif
     static_assert(sizeof(TpMoeDeviceRows) == 72);
     for (unsigned rows = 1; rows <= 8; ++rows) {
         // Route epilogues can reuse all transformed inputs only after B ends.
         // Their F32 vectors fit exactly without touching exported H or P.
         assert(uint64_t(rows) * 6 * 5120 * sizeof(float) ==
                tp_moe_split_activation_bytes(rows));
-        assert(tp_moe_full_nodes(rows) == tp_moe_split_nodes + 2 * tp_moe_adaptive_nodes(rows) + tp_moe_finish_extra_nodes);
+#ifdef STRIX_TRELLIS_TP_MOE_DEVICE_MERGED_CLASSES
+        // Device-routed plans: one merged core per projection, plus the map node.
+        assert(tp_moe_full_nodes(rows) == tp_moe_split_nodes + tp_moe_device_route_nodes + tp_moe_finish_extra_nodes);
+#else
+        assert(tp_moe_full_nodes(rows) == tp_moe_split_nodes + 2 * tp_moe_adaptive_nodes(rows) +
+               tp_moe_device_route_nodes + tp_moe_finish_extra_nodes);
+#endif
         assert(tp_moe_split_workspace_bytes(rows) == uint64_t(rows) * 642048 + tp_moe_split_route_bytes(rows));
-#ifdef STRIX_TRELLIS_TP_MOE_PREPARE_ROUTES
+#ifdef STRIX_TRELLIS_TP_MOE_ROUTE_MAPS
         // Both full 48-owner maps must fit after all live activations, including R1.
         assert(tp_moe_split_route_bytes(rows) == 8192);
         assert(2 * 48 * sizeof(TpMoeDeviceRows) <= tp_moe_split_route_bytes(rows));

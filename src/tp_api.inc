@@ -25,6 +25,8 @@ extern "C" void strix_tp_moe_device_desc_init(strix_tp_moe_device_desc* d) {
 
 #ifdef STRIX_TRELLIS_ENABLE_EXPERIMENTAL_TP
 #include "tp_dense.hpp"
+#include "tp_splitk.hpp"
+#include "dense_r1.hpp"
 #include "tp_moe.hpp"
 #include "tp_moe_policy.hpp"
 #include "tp_moe_split_layout.hpp"
@@ -40,6 +42,13 @@ struct strix_tp_dense_plan_impl {
     strix_weights weights;
     strix_trellis::TpDenseArguments arguments;
     hipStream_t stream;
+    strix_trellis::TpSplitLaunch split{};
+    bool use_split = false;
+    strix_trellis::DenseR1Launch r1{};
+    bool use_r1 = false;
+    strix_trellis::DenseR1Pair pair{};  // dense-r1 q_a + kv in one dispatch (second member's weights retained)
+    strix_weights second = nullptr;
+    bool use_pair = false;
 };
 struct strix_tp_moe_plan_impl {
     strix_context owner = nullptr;
@@ -246,11 +255,15 @@ strix_status strix_tp_dense_plan_submit(strix_tp_dense_plan p) {
     if (!p) return STRIX_ERROR_INVALID_ARGUMENT;
     const auto s = context_check(p->owner);
     if (s != STRIX_SUCCESS) return s;
-    return hip_status(strix_trellis::launch_tp_dense_trusted(p->arguments, p->stream));
+    if (p->use_pair) return hip_status(strix_trellis::launch_dense_r1_pair_trusted(p->pair, p->stream));
+    if (p->use_r1) return hip_status(strix_trellis::launch_dense_r1_trusted(p->r1, p->stream));
+    return hip_status(p->use_split ? strix_trellis::launch_tp_split_trusted(p->split, p->stream)
+        : strix_trellis::launch_tp_dense_trusted(p->arguments, p->stream));
 }
 strix_status strix_tp_dense_plan_destroy(strix_tp_dense_plan p) {
     if (!p) return STRIX_ERROR_INVALID_ARGUMENT;
     --p->weights->plan_refs;
+    if (p->second) --p->second->plan_refs;
     delete p;
     return STRIX_SUCCESS;
 }

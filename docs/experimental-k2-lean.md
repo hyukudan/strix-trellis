@@ -1,13 +1,55 @@
 # K2 S4 expert operator: lean core, folded R1 and host references (experimental)
 
-`STRIX_TRELLIS_TP_MOE_PIPELINED_K2` (the pretransformed expert pipeline used by
-the split creators) is OFF by default: it has not yet been compared case by
-case with the non-pipelined split path. When it is ON, its defaults are the
-qualified configuration: `LEAN_CORE`, `ADAPTIVE_ROWS`, `GROUPED_FINISH`,
-`SPLIT_PREPARE`, `SPLIT_GATE_FINISH`, `FUSE_DOWN_PREPARE`, `PREFETCH_ROWS=4`,
-`ROW_CAP=2`, `SINGLE_DEPTH=8`, `DOWN_DEPTH=6`. Each keeps its flag. None changes
-the S4 identity unless stated; options that change bits or were slower in a
-measured case stay OFF.
+## Defaults
+
+The split creators use the pretransformed expert pipeline
+(`STRIX_TRELLIS_TP_MOE_PIPELINED_K2`), ON by default, with these defaults:
+
+- `LEAN_CORE`, `ADAPTIVE_ROWS`, `GROUPED_FINISH`, `SPLIT_PREPARE`,
+  `SPLIT_GATE_FINISH` and `FUSE_DOWN_PREPARE`;
+- `PREFETCH_ROWS=4`, `ROW_CAP=2`, `SINGLE_DEPTH=8` and `DOWN_DEPTH=6`;
+- for device-routed plans:
+  - `DEVICE_ROUTE_MAPS`: owner maps are resolved once per replay by one small
+    kernel instead of in every core CTA;
+  - `DEVICE_MERGED_CLASSES`: one core per projection serves both row classes,
+    so no empty class grid is launched;
+  - `DEVICE_MERGED_DOWN_CAP4`: the merged down core runs groups of more than
+    two rows in four-row chunks, keeping the occupancy of the small-row core.
+
+  Windows of at most four rows use a merged image without the eight-row core,
+  and the small-row path shares the chunked core's code.
+
+Each option keeps its flag, and none changes the S4 identity. Host-routed
+plans are unchanged: their row classes are fixed at creation and empty classes
+are omitted.
+
+Per-case measurement:
+
+- Setup: one rank, 24 cases (shared, overlap and disjoint routes x R1-R8) with
+  device routes and with host routes, hot, plus 18 cold cases.
+- Method: medians of alternating build pairs.
+- Exactness: every build passed bitwise QA against the 0.3 operator on K2 and
+  mixed K2/K3 fixtures before timing.
+
+Results:
+
+- Against the 0.3 creator and the non-pipelined split path, the defaults are
+  never slower in any measured case. Device-routed shared windows at R3-R8
+  take 208/216/287/311/332/342 µs, against 289/306/367/393/409/417 µs without
+  the pipeline. R1 takes about 112-120 µs hot, against 225-245 µs.
+- Against the same pipeline with `ADAPTIVE_ROWS` off:
+  - device-routed overlapping routes at R2-R8 are 2-21 µs faster;
+  - shared-expert windows at R3-R8 are 51-281 µs faster (without adaptive
+    rows they are slower than the non-pipelined path);
+  - device-routed disjoint routes at R3/R4 are about 2.7 µs (0.5 %) slower in
+    every repetition. This is an open item: empty owner CTAs are still
+    launched.
+- Without the device options, device-routed shared windows at R5-R8 were 9-87
+  µs slower than the non-pipelined path, and device-routed overlapping or
+  disjoint routes paid for an empty row-class grid (up to 375 µs at R8).
+
+Options that change bits (`DECLARED_SWIGLU`, A8R) or were slower in a
+measured case (`FOLD_R1`) stay OFF.
 
 Evidence for the lean core, per case (medians of alternating build pairs,
 two separate GPU sessions, 24 cases: shared/overlap/disjoint routes x R1-R8,

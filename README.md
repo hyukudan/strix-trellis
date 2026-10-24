@@ -94,7 +94,8 @@ for one decoded token.
 | Prepared plans (`strix_linear_plan_*`) and region upload (`strix_weights_prepare_parts`) | Implemented in 0.2. CPU contract tests pass; GPU run pending. |
 | K2 R1 local-reduction kernel | Implemented, off by default (`STRIX_TRELLIS_BUILD_EXPERIMENTAL_K2_LOCAL`). GPU qualification pending. See [K2_LOCAL.md](docs/K2_LOCAL.md). |
 | TP rank APIs (`strix_tp_dense_*`, `strix_tp_moe_*`) | Implemented in 0.3, off by default (`STRIX_TRELLIS_ENABLE_EXPERIMENTAL_TP`). CPU contract tests pass and the HIP build compiles. See [TP_RANK.md](docs/TP_RANK.md). |
-| K2 expert split plans, lean core (`strix_tp_moe_plan_create_split`, `STRIX_TRELLIS_TP_MOE_PIPELINED_K2`) | Experimental; the pipeline is off by default, and when enabled defaults to the measured configuration with the lean core. Bitwise equal to the 0.3 expert operator on GPU fixtures and to a lane-exact CPU reference; operator timings below. Full-model qualification pending. See [experimental-k2-lean.md](docs/experimental-k2-lean.md). |
+| Dense R1 TP plans and grouped GEMV (`strix_tp_dense_plan_create_r1`, `strix_tp_dense_pair_plan_create_r1`, `strix_grouped_gemv_plan_*`) | Experimental (behind `STRIX_TRELLIS_ENABLE_EXPERIMENTAL_TP`). Exact-order split-K with S4 or LEGACY identities, bitwise reproducible per row; grouped plans match `strix_gemv` R1 bits per row. Schedules come from cold sweeps; see [DENSE_R1.md](docs/DENSE_R1.md) and the CHANGELOG. |
+| K2 expert split plans, lean core (`strix_tp_moe_plan_create_split`, `STRIX_TRELLIS_TP_MOE_PIPELINED_K2`) | Experimental (behind `STRIX_TRELLIS_ENABLE_EXPERIMENTAL_TP`); the pipeline and its measured configuration are on by default. Bitwise equal to the 0.3 expert operator on GPU fixtures and to a lane-exact CPU reference; operator timings below. Full-model qualification pending. See [experimental-k2-lean.md](docs/experimental-k2-lean.md). |
 | K2 A8R expert arithmetic (`STRIX_TRELLIS_TP_MOE_A8R`) | Experimental, compiled out by default. A distinct arithmetic identity, **not** bitwise equal to the S4 path; not measured here. See [experimental-a8r.md](docs/experimental-a8r.md). |
 | Grouped MoE (`strix_grouped_moe`) | Works, one stream over groups; no performance work. |
 | Python HIP bindings | None. Python provides the reference and weight transport; C/C++ drives the GPU. |
@@ -197,14 +198,28 @@ the pattern.
 - `STRIX_TRELLIS_TP_MOE_DECLARED_SWIGLU` (changes H: clamped SwiGLU with an
   exponential reproducible on the host) measured 154.7–155.1 µs cold and
   114.6–118.4 µs hot at R1.
-- Build with `STRIX_TRELLIS_TP_MOE_PIPELINED_K2=ON`. Its defaults are the
-  measured configuration above, lean core included (`PREFETCH_ROWS=4`,
-  `ROW_CAP=2`, `SINGLE_DEPTH=8`, `DOWN_DEPTH=6`, `FUSE_DOWN_PREPARE`,
-  `ADAPTIVE_ROWS`, `GROUPED_FINISH`, `SPLIT_PREPARE`, `SPLIT_GATE_FINISH`,
-  `LEAN_CORE`; all `STRIX_TRELLIS_TP_MOE_*`, each can be switched off). The
-  pipeline itself stays off by default until it is compared case by case with
-  the non-pipelined split path. `STRIX_TRELLIS_TP_MOE_FOLD_R1` is exact but
-  slower and stays off.
+- Defaults (all `STRIX_TRELLIS_TP_MOE_*`, each can be switched off):
+  - the pipeline (`PIPELINED_K2`) with the lean core and the measured
+    configuration (`PREFETCH_ROWS=4`, `ROW_CAP=2`, `SINGLE_DEPTH=8`,
+    `DOWN_DEPTH=6`, `FUSE_DOWN_PREPARE`, `GROUPED_FINISH`, `SPLIT_PREPARE`,
+    `SPLIT_GATE_FINISH`, `ADAPTIVE_ROWS`);
+  - for device-routed plans, owner maps resolved once per replay and one core
+    for both row classes (`DEVICE_ROUTE_MAPS`, `DEVICE_MERGED_CLASSES`,
+    `DEVICE_MERGED_DOWN_CAP4`).
+
+  In 24 hot device-routed cases, 24 hot host-routed cases and 18 cold cases,
+  this is never slower than the non-pipelined split path or the 0.3 creator.
+  Device-routed shared-expert windows at R3–R8 take 208–342 µs instead of
+  289–417 µs.
+
+  Against the same pipeline with `ADAPTIVE_ROWS` off:
+  - shared-expert windows are 51–281 µs faster;
+  - device-routed overlapping routes at R2–R8 are 2–21 µs faster;
+  - device-routed disjoint routes at R3/R4 are about 2.7 µs (0.5 %) slower.
+
+  Details are in
+  [experimental-k2-lean.md](docs/experimental-k2-lean.md).
+  `STRIX_TRELLIS_TP_MOE_FOLD_R1` is exact but slower and stays off.
 - Correctness: bitwise equal to the 0.3 expert operator on 24 K2 and 24 mixed
   K2/K3 GPU fixtures (H, P, Y, graph replay, invalid routes, NaN). A lane-exact
   CPU model of the S4 core reproduces the GPU P and Y bit for bit; its

@@ -42,8 +42,11 @@ STRIX_MOE_SPLIT_HD constexpr uint64_t tp_moe_split_activation_bytes(unsigned row
     return 0;
 #endif
 }
+#if defined(STRIX_TRELLIS_TP_MOE_PREPARE_ROUTES) || defined(STRIX_TRELLIS_TP_MOE_DEVICE_ROUTE_MAPS)
+#define STRIX_TRELLIS_TP_MOE_ROUTE_MAPS 1
+#endif
 STRIX_MOE_SPLIT_HD constexpr uint64_t tp_moe_split_route_bytes(unsigned rows) {
-#ifdef STRIX_TRELLIS_TP_MOE_PREPARE_ROUTES
+#ifdef STRIX_TRELLIS_TP_MOE_ROUTE_MAPS
     // Two maps for each of at most 48 owner candidates; each map is 72 B.
     return rows >= 1 && rows <= 8 ? 8192 : 0;
 #else
@@ -55,6 +58,13 @@ STRIX_MOE_SPLIT_HD constexpr uint64_t tp_moe_split_route_bytes(unsigned rows) {
 constexpr unsigned tp_moe_route_nodes = 1;
 #else
 constexpr unsigned tp_moe_route_nodes = 0;
+#endif
+// Extra node of device-routed plans: their owner maps are prepared once per
+// replay ahead of the gate stage (and ahead of a staged down core).
+#if defined(STRIX_TRELLIS_TP_MOE_PIPELINED_K2) && defined(STRIX_TRELLIS_TP_MOE_DEVICE_ROUTE_MAPS)
+constexpr unsigned tp_moe_device_route_nodes = 1;
+#else
+constexpr unsigned tp_moe_device_route_nodes = 0;
 #endif
 #ifdef STRIX_TRELLIS_TP_MOE_PIPELINED_K2
 constexpr unsigned tp_moe_split_gate_nodes = 3 + tp_moe_route_nodes;
@@ -84,7 +94,14 @@ constexpr unsigned tp_moe_finish_extra_nodes = 0;
 #endif
 // Maximum for mutable device routes. Immutable plans can omit empty classes.
 STRIX_MOE_SPLIT_HD constexpr unsigned tp_moe_full_nodes(unsigned rows) {
-    return tp_moe_split_nodes + 2 * tp_moe_adaptive_nodes(rows) + tp_moe_finish_extra_nodes;
+#if defined(STRIX_TRELLIS_TP_MOE_PIPELINED_K2) && defined(STRIX_TRELLIS_TP_MOE_DEVICE_MERGED_CLASSES)
+    // Device-routed plans run both row classes in one core per projection.
+    (void)rows;
+    return tp_moe_split_nodes + tp_moe_device_route_nodes + tp_moe_finish_extra_nodes;
+#else
+    return tp_moe_split_nodes + 2 * tp_moe_adaptive_nodes(rows) + tp_moe_device_route_nodes +
+        tp_moe_finish_extra_nodes;
+#endif
 }
 STRIX_MOE_SPLIT_HD constexpr uint64_t tp_moe_split_workspace_bytes(unsigned rows) {
     return tp_moe_split_hidden_bytes(rows) + tp_moe_split_partial_bytes(rows) +

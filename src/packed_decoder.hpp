@@ -5,7 +5,8 @@
 namespace strix_trellis::packed_decode {
 template<int Bits,bool FastWrap=true> struct SaddrLane {
     static_assert(Bits>=1 && Bits<=8 && FastWrap);
-    uint32_t high,low,tail;
+    uint32_t high=0,low=0,tail=0;
+    SaddrLane() = default;
     __device__ __forceinline__ static uint32_t load(const unsigned char* base,int index) {
         uint32_t offset=uint32_t(index)*4u;
         // Keep an unsigned32 VMEM offset opaque. The C++ load remains visible to

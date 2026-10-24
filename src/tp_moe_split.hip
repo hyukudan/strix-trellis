@@ -336,6 +336,18 @@ hipError_t launch_tp_moe_route_probe(unsigned rows, unsigned bank_count,
     return hipGetLastError();
 }
 const void* tp_moe_split_function(unsigned stage, unsigned rows) {
+#if defined(STRIX_TRELLIS_TP_MOE_PIPELINED_K2) && defined(STRIX_TRELLIS_TP_MOE_DEVICE_ROUTE_MAPS)
+    if (rows >= 1 && rows <= 8 && stage == 13)
+        return reinterpret_cast<const void*>(tp_moe_split::pipeline_prepare_routes);
+#endif
+#if defined(STRIX_TRELLIS_TP_MOE_PIPELINED_K2) && defined(STRIX_TRELLIS_TP_MOE_DEVICE_MERGED_CLASSES)
+    if (rows >= 1 && rows <= 8 && stage == 14)
+        return rows <= 4 ? reinterpret_cast<const void*>(tp_moe_split::pipeline_core<4, false, 3>)
+                         : reinterpret_cast<const void*>(tp_moe_split::pipeline_core<8, false, 3>);
+    if (rows >= 1 && rows <= 8 && stage == 15)
+        return rows <= 4 ? reinterpret_cast<const void*>(tp_moe_split::pipeline_core<4, true, 3>)
+                         : reinterpret_cast<const void*>(tp_moe_split::pipeline_core<8, true, 3>);
+#endif
 #ifdef STRIX_TRELLIS_TP_MOE_PARALLEL_FINISH
     if (rows >= 1 && rows <= 8 && stage == 11)
         return reinterpret_cast<const void*>(tp_moe_split::parallel_route_finish);
@@ -392,6 +404,23 @@ hipError_t query_tp_moe_split_resources(unsigned rows, size_t available, bool* s
         if (e != hipSuccess) return e;
         const int threads = stage == 11 ? 32 : 128;
         if (a.maxThreadsPerBlock < threads || a.sharedSizeBytes > available) return hipSuccess;
+    }
+#endif
+#if defined(STRIX_TRELLIS_TP_MOE_PIPELINED_K2) && defined(STRIX_TRELLIS_TP_MOE_DEVICE_ROUTE_MAPS)
+    {
+        hipFuncAttributes a{};
+        const auto e = hipFuncGetAttributes(&a, tp_moe_split_function(13, rows));
+        if (e != hipSuccess) return e;
+        if (a.maxThreadsPerBlock < 32 || a.sharedSizeBytes > available) return hipSuccess;
+    }
+#endif
+#if defined(STRIX_TRELLIS_TP_MOE_PIPELINED_K2) && defined(STRIX_TRELLIS_TP_MOE_DEVICE_MERGED_CLASSES)
+    for (unsigned stage : {14u, 15u}) {
+        hipFuncAttributes a{};
+        const auto e = hipFuncGetAttributes(&a, tp_moe_split_function(stage, rows));
+        if (e != hipSuccess) return e;
+        if (a.maxThreadsPerBlock < int(tp_moe_pipeline_core_threads) || a.sharedSizeBytes > available)
+            return hipSuccess;
     }
 #endif
 #ifdef STRIX_TRELLIS_TP_MOE_ADAPTIVE_ROWS

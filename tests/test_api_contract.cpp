@@ -23,6 +23,7 @@ hipError_t hipMemGetAddressRange(hipDeviceptr_t*, size_t*, hipDeviceptr_t);
 hipError_t hipMalloc(void**, size_t);
 hipError_t hipFree(void*);
 hipError_t hipMemcpyAsync(void*, const void*, size_t, int, hipStream_t);
+hipError_t hipMemsetAsync(void*, int, size_t, hipStream_t);
 hipError_t hipStreamSynchronize(hipStream_t);
 #endif
 #else

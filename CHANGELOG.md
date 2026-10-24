@@ -6,7 +6,47 @@ Source versions follow `STRIX_TRELLIS_VERSION_*` in
 below compare one of our builds with the previous one, measured in the same
 session on the same machine.
 
-## Unreleased — 2026-10-23
+## Unreleased — 2026-10-24
+
+- K2 expert pipeline for device-routed plans: owner maps are resolved once per
+  replay (`STRIX_TRELLIS_TP_MOE_DEVICE_ROUTE_MAPS`), and one core serves both
+  row classes (`STRIX_TRELLIS_TP_MOE_DEVICE_MERGED_CLASSES`, with the down core
+  in four-row chunks under `STRIX_TRELLIS_TP_MOE_DEVICE_MERGED_DOWN_CAP4`;
+  windows of at most four rows use an image without the eight-row core).
+  Before, every core CTA re-resolved its owner map, and an empty row-class grid
+  was launched on every replay. Same bits. Host-routed plans are unchanged.
+- Defaults: the pipeline (`STRIX_TRELLIS_TP_MOE_PIPELINED_K2`), `ADAPTIVE_ROWS`
+  and the device options are now ON. In 24 hot device-routed cases, 24 hot
+  host-routed cases and 18 cold cases (one rank, isolated operator, bitwise QA
+  against the 0.3 operator first), the default is never slower than the
+  non-pipelined split path or the 0.3 creator. Device-routed shared-expert
+  windows at R3–R8 take 208–342 µs instead of 289–417 µs. Split plans need the
+  larger pipeline workspace; query `strix_tp_moe_split_workspace_bytes`.
+- CPU: the API contract and the pipeline layout test also run with the
+  library's pipeline configuration.
+- Dense R1 TP path (`strix_tp_dense_plan_create_r1`,
+  `strix_tp_dense_r1_workspace_bytes`; see [DENSE_R1.md](docs/DENSE_R1.md)):
+  - exact-order single-dispatch split-K GEMV with physical output tiling;
+  - S4 or LEGACY numerical identities, each bitwise reproducible per row;
+  - schedules chosen per shape and row count from a measured profile.
+- Grouped strided GEMV plans (`strix_grouped_gemv_plan_*`): up to eight
+  independent projections of one geometry in one dispatch, each row with the
+  bits of `strix_gemv` R1. Counters sit at geometry-fixed offsets, so plans of
+  different row counts can share one workspace.
+- `strix_tp_dense_pair_plan_create_r1`: the `q_a` (S16) and `kv` (S32) LEGACY
+  projections of one input in one dispatch.
+- Cold-swept schedule policy for the grouped `o_a` projections (four
+  4096→1024 groups) and for K4 `o_b` at R5/R6. Isolated operator, one gfx1151
+  device, weights rotating over more than 96 MB, every schedule checked bitwise
+  against the policy before timing. Results:
+
+  | Case | Before | After |
+  |---|---:|---:|
+  | Grouped `o_a`, R1 | 108.5 µs as four separate calls; 54.8 µs grouped | 51.6 µs |
+  | Grouped `o_a`, R6 | 141.8 µs as four separate calls; 77.9 µs grouped | 68.4 µs |
+  | `o_b` K4, R5/R6 | 70.3 µs | 62.6 µs |
+
+## 2026-10-23
 
 - K2 expert split plans (`strix_tp_moe_split_workspace_bytes`,
   `strix_tp_moe_plan_create_split`, `strix_tp_moe_plan_create_device_split`,
@@ -30,13 +70,14 @@ session on the same machine.
   out by default): a distinct identity, not bitwise equal to S4. Not measured.
 - Defaults: the pretransformed pipeline (`STRIX_TRELLIS_TP_MOE_PIPELINED_K2`)
   is OFF, so default builds select the same kernels and bits as 0.3.0. When it
-  is ON, its options default to the measured exact configuration
-  (`LEAN_CORE`, `ADAPTIVE_ROWS`, `GROUPED_FINISH`, `SPLIT_PREPARE`,
+  is ON, its options default to the configuration measured with host-routed
+  windows (`LEAN_CORE`, `ADAPTIVE_ROWS`, `GROUPED_FINISH`, `SPLIT_PREPARE`,
   `SPLIT_GATE_FINISH`, `FUSE_DOWN_PREPARE`, `PREFETCH_ROWS=4`, `ROW_CAP=2`,
   `SINGLE_DEPTH=8`, `DOWN_DEPTH=6`); each keeps its flag. Options that change
-  bits (`DECLARED_SWIGLU`, A8R) or were slower somewhere (`FOLD_R1`) stay OFF. CPU CTest 18/18, Python 61 tests (3 skipped without the
-  external fixture), HIP build for `gfx1151` with default and recommended
-  options.
+  bits (`DECLARED_SWIGLU`, A8R) or were slower somewhere (`FOLD_R1`) stay OFF.
+  Device-routed windows were measured afterwards; see 2026-10-24.
+- CPU CTest 18/18, Python 61 tests (3 skipped without the external fixture),
+  HIP build for `gfx1151` with default and recommended options.
 - CPU reference: `unpack_states_vectorized` and `dequantize_rotated_vectorized`,
   array forms of the scalar decoder with identical output (about 6 M weights/s
   on one CPU process instead of a Python loop per tile).

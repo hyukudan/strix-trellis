@@ -314,8 +314,141 @@ strix_status strix_tp_dense_plan_create(strix_context context,
 strix_status strix_tp_dense_plan_create_tiled(strix_context context,
     const strix_matmul_desc *desc, const strix_stream *stream,
     uint32_t rows_per_block, strix_tp_dense_plan *out);
+/* Large-K additive path. Existing creators retain 0.3 S4/zero-workspace.
+ * Query returns zero for shapes retaining that path. SINGLE uses agent fences
+ * and integer counters; TWO explicitly selects the two-kernel fallback.
+ * Never reuse workspace concurrently. Creation clears counters and waits;
+ * submit only enqueues. Recreate after an asynchronous device failure. */
+#define STRIX_TP_SPLITK_SINGLE UINT32_C(0)
+#define STRIX_TP_SPLITK_TWO UINT32_C(1)
+strix_status strix_tp_dense_workspace_bytes(strix_context context,
+    const strix_matmul_desc *desc, uint32_t rows_per_block, uint64_t *out_bytes);
+strix_status strix_tp_dense_plan_create_splitk(strix_context context,
+    const strix_matmul_desc *desc, const strix_stream *stream,
+    uint32_t rows_per_block, uint32_t strategy, strix_tp_dense_plan *out);
+typedef struct strix_tp_dense_pair_member {
+    strix_weights weights;
+    strix_tensor_desc output;
+    float alpha;
+    float beta;
+} strix_tp_dense_pair_member;
+typedef struct strix_tp_dense_pair_desc {
+    uint32_t struct_size;
+    uint32_t abi_version;
+    strix_tensor_desc input;
+    strix_tp_dense_pair_member member[2]; /* q_a then kv; independent K4/K5. */
+    void *workspace;
+    uint64_t workspace_bytes;
+    uint32_t rows_per_block; /* 0 selects R. */
+    uint32_t strategy;
+    uint64_t reserved[4];
+} strix_tp_dense_pair_desc;
+typedef struct strix_tp_swiglu_desc {
+    uint32_t struct_size;
+    uint32_t abi_version;
+    strix_tensor_desc input;
+    strix_weights gate;
+    strix_weights up;
+    strix_tensor_desc hidden_output; /* [R,1152], alpha=1, beta=0. */
+    void *workspace;
+    uint64_t workspace_bytes;
+    uint32_t rows_per_block;
+    uint32_t strategy;
+    /* Optional contiguous [R,1152] diagnostics. Each non-NULL buffer has
+     * diagnostic_bytes bytes and must be disjoint from all other buffers. */
+    float *diagnostic_gate;
+    float *diagnostic_up;
+    uint64_t diagnostic_bytes;
+    uint64_t reserved[4];
+} strix_tp_swiglu_desc;
+typedef struct strix_tp_dense_pair_plan_impl *strix_tp_dense_pair_plan;
+typedef struct strix_tp_dense_pair_plan_impl *strix_tp_swiglu_plan;
+void strix_tp_dense_pair_desc_init(strix_tp_dense_pair_desc *desc);
+void strix_tp_swiglu_desc_init(strix_tp_swiglu_desc *desc);
+strix_status strix_tp_dense_pair_workspace_bytes(strix_context context,
+    const strix_tp_dense_pair_desc *desc, uint64_t *out_bytes);
+strix_status strix_tp_dense_pair_plan_create(strix_context context,
+    const strix_tp_dense_pair_desc *desc, const strix_stream *stream, strix_tp_dense_pair_plan *out);
+strix_status strix_tp_dense_pair_plan_submit(strix_tp_dense_pair_plan plan);
+strix_status strix_tp_dense_pair_plan_destroy(strix_tp_dense_pair_plan plan);
+strix_status strix_tp_swiglu_workspace_bytes(strix_context context,
+    const strix_tp_swiglu_desc *desc, uint64_t *out_bytes);
+strix_status strix_tp_swiglu_plan_create(strix_context context,
+    const strix_tp_swiglu_desc *desc, const strix_stream *stream, strix_tp_swiglu_plan *out);
+strix_status strix_tp_swiglu_plan_submit(strix_tp_swiglu_plan plan);
+strix_status strix_tp_swiglu_plan_destroy(strix_tp_swiglu_plan plan);
+/* Explicit numerical identity for the dense-r1 experimental implementation.
+ * S4 preserves the TP03 four-chain order. LEGACY preserves the per-shape
+ * S16/S32/S4 order of splitk04 (independent of the number of submitted rows).
+ * The query/creator never change generic GEMV or existing split-K dispatch.
+ * Workspace is 256-byte aligned, stream-serial, retained through graph replay.
+ * Counters are initialized only by creation and reset by the completing CTA.
+ * All existing TP dense shapes plus head 5120->64640/129280, K4/K5 mul1.
+ * Use ordinary dense plan submit/destroy for the returned handle. */
+#define STRIX_DENSE_R1_S4 UINT32_C(0)
+#define STRIX_DENSE_R1_LEGACY UINT32_C(1)
+strix_status strix_tp_dense_r1_workspace_bytes(strix_context context,
+    const strix_matmul_desc *desc, uint32_t rows_per_block, uint32_t identity,
+    uint64_t *out_bytes);
+strix_status strix_tp_dense_plan_create_r1(strix_context context,
+    const strix_matmul_desc *desc, const strix_stream *stream,
+    uint32_t rows_per_block, uint32_t identity, strix_tp_dense_plan *out);
 strix_status strix_tp_dense_plan_submit(strix_tp_dense_plan plan);
 strix_status strix_tp_dense_plan_destroy(strix_tp_dense_plan plan);
+/* q_a + kv in one dispatch over the dense-r1 kernels (LEGACY identity only):
+ * member[0] 5120 -> 1280 (S16), member[1] 5120 -> 512 (S32), one shared input,
+ * K4/K5 (both members the same), rows 1..8, rows_per_block 0, alpha 1, beta 0.
+ * Each member's rows have the bits of its own dense-r1 LEGACY plan. The
+ * returned handle is an ordinary dense plan (submit / destroy). Counters sit at
+ * the start of the workspace; creation zeroes them and synchronizes. */
+strix_status strix_tp_dense_pair_r1_workspace_bytes(strix_context context,
+    const strix_tp_dense_pair_desc *desc, uint32_t identity, uint64_t *out_bytes);
+strix_status strix_tp_dense_pair_plan_create_r1(strix_context context,
+    const strix_tp_dense_pair_desc *desc, const strix_stream *stream,
+    uint32_t identity, strix_tp_dense_plan *out);
+/* Grouped strided GEMV (experimental, dense-r1 kernels): G <= 8 independent
+ * linears of one geometry and bit width in one dispatch,
+ *   output[r][g * output_group_stride + n] = Linear_g(input[r][g * input_group_stride + i]),
+ * alpha 1, beta 0, rows 1..8, strides in F32 elements. Admitted geometry:
+ * 4096 -> 1024, K4/K5 mul1, no bias. STRIX_GEMV_ROW_INVARIANT_R1 (required)
+ * fixes every row to the bits of that row submitted alone through strix_gemv
+ * (the generic GEMV's single-row K partition: K4 32, K5 16 splits).
+ * Outputs of different groups must be disjoint (output_group_stride >= N,
+ * output_row_stride >= (G - 1) * output_group_stride + N for rows > 1).
+ * The plan freezes all pointers, rows and the stream. Creation zeroes the
+ * workspace counters and synchronizes the stream; each completed submission
+ * leaves them zero. Counters sit at the start of the workspace at offsets that
+ * depend only on the geometry, followed by the partial planes, so plans of one
+ * stream and geometry (any rows / group count) may share a workspace serially.
+ * Workspace is 256-byte aligned device memory. */
+#define STRIX_TRELLIS_HAS_GROUPED_GEMV 1
+#define STRIX_GEMV_ROW_INVARIANT_R1 UINT32_C(1)
+typedef struct strix_grouped_gemv_desc {
+    uint32_t struct_size;
+    uint32_t abi_version;
+    const strix_weights *weights; /* group_count handles, read at creation */
+    uint64_t group_count;
+    uint32_t rows;
+    uint32_t flags;
+    const float *input;
+    uint64_t input_row_stride;
+    uint64_t input_group_stride;
+    uint64_t input_buffer_bytes;
+    float *output;
+    uint64_t output_row_stride;
+    uint64_t output_group_stride;
+    uint64_t output_buffer_bytes;
+    void *workspace;
+    uint64_t workspace_bytes;
+    uint64_t reserved[4];
+} strix_grouped_gemv_desc;
+typedef struct strix_grouped_gemv_plan_impl *strix_grouped_gemv_plan;
+strix_status strix_grouped_gemv_workspace_bytes(strix_context context,
+    const strix_grouped_gemv_desc *desc, uint64_t *out_bytes);
+strix_status strix_grouped_gemv_plan_create(strix_context context,
+    const strix_grouped_gemv_desc *desc, const strix_stream *stream, strix_grouped_gemv_plan *out);
+strix_status strix_grouped_gemv_plan_submit(strix_grouped_gemv_plan plan);
+strix_status strix_grouped_gemv_plan_destroy(strix_grouped_gemv_plan plan);
 void strix_tp_moe_desc_init(strix_tp_moe_desc *desc);
 void strix_tp_moe_device_desc_init(strix_tp_moe_device_desc *desc);
 strix_status strix_tp_moe_workspace_bytes(strix_context context,

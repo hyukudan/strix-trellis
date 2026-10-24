@@ -6,17 +6,56 @@
 #undef main
 #include <limits>
 
+int tp_memsets = 0;
+hipError_t hipMemsetAsync(void* p, int value, size_t count, hipStream_t) {
+    const auto i = fake::find(p);
+    assert(i != fake::buffers.end() && reinterpret_cast<uintptr_t>(p) + count <= i->first + i->second);
+    ++tp_memsets; std::memset(p, value, count); return hipSuccess;
+}
+
 namespace tp_fake {
 int resource_error = 0, dense_error = 0, gate_error = 0, down_error = 0, core_error = 0, finish_error = 0;
 bool supported = true;
 unsigned dense_resources = 0, moe_resources = 0, dense_calls = 0, gate_calls = 0, down_calls = 0;
 int resource_bits = 0, resource_rows = 0;
 strix_trellis::TpDenseArguments dense{};
+strix_trellis::TpSplitLaunch split{};
+strix_trellis::DenseR1Launch r1{};
 strix_trellis::TpMoeLaunch moe{};
 std::vector<char> order;
 }
 
 namespace strix_trellis {
+hipError_t query_dense_r1_resources(const DenseR1Launch&, size_t, bool* supported) {
+    ++tp_fake::dense_resources; *supported=tp_fake::supported; return tp_fake::resource_error;
+}
+hipError_t launch_dense_r1_trusted(const DenseR1Launch& a, hipStream_t stream) {
+    tp_fake::r1=a; ++fake::launches; fake::last_stream=stream; return tp_fake::dense_error;
+}
+// Grouped and paired dense-r1 plans: one resource query and one dispatch each.
+hipError_t query_dense_r1_group_resources(const DenseR1Launch&, size_t, bool* supported) {
+    ++tp_fake::dense_resources; *supported=tp_fake::supported; return tp_fake::resource_error;
+}
+hipError_t launch_dense_r1_group_trusted(const DenseR1Group& g, int, hipStream_t stream) {
+    tp_fake::r1=g.member[0]; ++fake::launches; fake::last_stream=stream; return tp_fake::dense_error;
+}
+hipError_t query_dense_r1_pair_resources(const DenseR1Pair&, size_t, bool* supported) {
+    ++tp_fake::dense_resources; *supported=tp_fake::supported; return tp_fake::resource_error;
+}
+hipError_t launch_dense_r1_pair_trusted(const DenseR1Pair& p, hipStream_t stream) {
+    tp_fake::r1=p.member[0]; ++fake::launches; fake::last_stream=stream; return tp_fake::dense_error;
+}
+hipError_t query_tp_split_resources(const TpSplitLaunch&, size_t, bool* supported) {
+    ++tp_fake::dense_resources;
+    *supported = tp_fake::supported;
+    return tp_fake::resource_error;
+}
+hipError_t launch_tp_split_trusted(const TpSplitLaunch& a, hipStream_t stream) {
+    tp_fake::split = a;
+    fake::launches += a.two_kernel ? 2 : 1;
+    fake::last_stream = stream;
+    return tp_fake::dense_error;
+}
 hipError_t query_tp_dense_resources(int bits, int rows, size_t shared, bool* supported) {
     ++tp_fake::dense_resources;
     assert(shared == fake::shared_bytes);
@@ -48,6 +87,16 @@ hipError_t launch_tp_moe_split_finish(const TpMoeLaunch& args, hipStream_t strea
     ++fake::launches; tp_fake::moe = args; fake::last_stream = stream;
     tp_fake::order.push_back('C'); return tp_fake::finish_error;
 }
+#if defined(STRIX_TRELLIS_TP_MOE_PIPELINED_K2) && defined(STRIX_TRELLIS_TP_MOE_FUSE_DOWN_PREPARE)
+// The fused full submit enqueues the same three stages and stops at the first
+// failing one, like the staged path.
+hipError_t launch_tp_moe_split_full(const TpMoeLaunch& args, hipStream_t stream) {
+    auto e = launch_tp_moe_split_gate_up(args, stream);
+    if (e == hipSuccess) e = launch_tp_moe_split_core(args, stream);
+    if (e == hipSuccess) e = launch_tp_moe_split_finish(args, stream);
+    return e;
+}
+#endif
 hipError_t launch_tp_dense_trusted(const TpDenseArguments& args, hipStream_t stream) {
     ++tp_fake::dense_calls; ++fake::launches;
     tp_fake::dense = args; fake::last_stream = stream;
@@ -67,16 +116,19 @@ hipError_t launch_tp_moe_down(const TpMoeLaunch& args, hipStream_t stream) {
 
 namespace {
 struct Counters {
+    int memsets = tp_memsets;
     int allocs = fake::allocs, copies = fake::copies, syncs = fake::syncs;
     int launches = fake::launches, pointers = fake::pointer_queries;
     int ranges = fake::range_queries, streams = fake::stream_queries;
     unsigned dense_resources = tp_fake::dense_resources, moe_resources = tp_fake::moe_resources;
     size_t buffers = fake::buffers.size();
     void no_work() const {
+        assert(tp_memsets == memsets);
         assert(fake::allocs == allocs && fake::copies == copies && fake::syncs == syncs);
         assert(fake::launches == launches && fake::buffers.size() == buffers);
     }
     void hot_path(int launched) const {
+        assert(tp_memsets == memsets);
         assert(fake::allocs == allocs && fake::copies == copies && fake::syncs == syncs);
         assert(fake::pointer_queries == pointers && fake::range_queries == ranges && fake::stream_queries == streams);
         assert(tp_fake::dense_resources == dense_resources && tp_fake::moe_resources == moe_resources);
@@ -201,11 +253,15 @@ void dense_negative() {
         Buffer x((5120 + 17) * 8 * 4 + 256), y((1152 + 23) * 8 * 4 + 256);
         const auto good = dense_desc(weights, 3, x.at(12), y.at(20));
         auto d = good;
+        unsigned rejection = 0;
         auto reject = [&](strix_status expected, unsigned tile = 0) {
             strix_tp_dense_plan plan = reinterpret_cast<strix_tp_dense_plan>(uintptr_t(1));
             Counters before;
             const auto retained_before = weights->plan_refs;
-            assert(strix_tp_dense_plan_create_tiled(env.context, &d, &env.stream, tile, &plan) == expected && !plan);
+            const auto actual = strix_tp_dense_plan_create_tiled(env.context, &d, &env.stream, tile, &plan);
+            ++rejection;
+            if (actual != expected || plan) std::cerr << "dense rejection=" << rejection << " expected=" << expected << " actual=" << actual << '\n';
+            assert(actual == expected && !plan);
             before.no_work(); assert(weights->plan_refs == retained_before);
             d = good;
         };
@@ -229,7 +285,8 @@ void dense_negative() {
         d.input.strides[0] = 5119; reject(STRIX_ERROR_UNSUPPORTED_FORMAT);
         d.input.strides[0] = UINT64_MAX; reject(STRIX_ERROR_INVALID_ARGUMENT);
         d.input.buffer_bytes--; reject(STRIX_ERROR_INSUFFICIENT_BUFFER);
-        d.input.data = x.at(x.bytes - 4); reject(STRIX_ERROR_INSUFFICIENT_BUFFER);
+        d.input.data = x.at(x.bytes - 4); d.input.buffer_bytes = 4;
+        reject(STRIX_ERROR_INSUFFICIENT_BUFFER);
         d.input.data = x.at(1); reject(STRIX_ERROR_INVALID_ARGUMENT);
         d.input.data = reinterpret_cast<void*>(UINTPTR_MAX - 3); reject(STRIX_ERROR_INVALID_ARGUMENT);
         d.output.data = d.input.data; reject(STRIX_ERROR_INVALID_ARGUMENT);
@@ -573,7 +630,14 @@ void device_moe_negative(Environment& env, const std::vector<strix_weights>& wei
 void split_contract(Environment& env, const std::vector<strix_weights>& weights) {
     for (unsigned rows = 1; rows <= 8; ++rows) {
         MoeCase m(rows, rows * 6, weights);
-        Buffer workspace(size_t(rows) * 519168);
+        // H and P (519168 B per row) plus, with the pipeline, the transformed
+        // activations (122880 B per row) and the device route maps.
+        Buffer workspace(size_t(strix_trellis::tp_moe_split_workspace_bytes(rows)));
+#ifdef STRIX_TRELLIS_TP_MOE_PIPELINED_K2
+        assert(workspace.bytes == size_t(rows) * 642048 + strix_trellis::tp_moe_split_route_bytes(rows));
+#else
+        assert(workspace.bytes == size_t(rows) * 519168);
+#endif
         uint64_t bytes = 0;
         Counters query;
         assert(strix_tp_moe_split_workspace_bytes(env.context, &m.d, &bytes) == STRIX_SUCCESS);
@@ -643,6 +707,150 @@ void split_contract(Environment& env, const std::vector<strix_weights>& weights)
 }
 } // namespace
 
+void dense_split_contract() {
+    Environment env;
+    auto qa = prepare(env,5120,1280,4), kv = prepare(env,5120,512,5);
+    auto gate = prepare(env,5120,1152,4), up = prepare(env,5120,1152,5);
+    auto q_projection = prepare(env,1280,16384,4), o_projection = prepare(env,4096,5120,5);
+    Buffer x(8*5200*4), y0(8*16420*4), y1(8*16420*4);
+    for (auto w : {qa,kv,gate,up,q_projection,o_projection}) for (unsigned rows = 1; rows <= 8; ++rows)
+        for (unsigned tile = 1; tile <= rows; ++tile) for (unsigned mode : {0u,1u}) {
+            auto d = dense_desc(w,rows,x.pointer,y0.pointer);
+            uint64_t bytes = 99;
+            Counters query;
+            assert(strix_tp_dense_workspace_bytes(env.context,&d,tile,&bytes) == STRIX_SUCCESS);
+            query.no_work();
+            strix_trellis::TpSplitLayout l;
+            assert(strix_trellis::tp_split_layout(w->device.input,w->device.output,int(rows),int(tile),l) && bytes == l.bytes);
+            Buffer ws{size_t(bytes)}; d.workspace = ws.pointer; d.workspace_bytes = bytes;
+            std::memset(ws.pointer,0xa5,size_t(bytes));
+            strix_tp_dense_plan p = nullptr;
+            assert(strix_tp_dense_plan_create_splitk(env.context,&d,&env.stream,tile,mode,&p) == STRIX_SUCCESS);
+            for (size_t i = l.counter_offset; i < bytes; ++i) assert(static_cast<unsigned char*>(ws.pointer)[i] == 0);
+            assert(static_cast<unsigned char*>(ws.pointer)[0] == 0xa5);
+            Counters submit;
+            assert(strix_tp_dense_plan_submit(p) == STRIX_SUCCESS); submit.hot_path(mode ? 2 : 1);
+            assert(tp_fake::split.member[0].rows_per_block == int(tile));
+            assert(tp_fake::split.counters == reinterpret_cast<uint32_t*>(static_cast<char*>(ws.pointer)+l.counter_offset));
+            assert(strix_weights_destroy(w) == STRIX_ERROR_INVALID_ARGUMENT);
+            assert(strix_tp_dense_plan_destroy(p) == STRIX_SUCCESS);
+            auto invalid = d; invalid.workspace_bytes = bytes-1;
+            Counters fail;
+            assert(strix_tp_dense_plan_create_splitk(env.context,&invalid,&env.stream,tile,mode,&p) == STRIX_ERROR_INSUFFICIENT_BUFFER);
+            assert(!p); fail.no_work();
+            invalid = d; invalid.workspace = x.pointer;
+            assert(strix_tp_dense_plan_create_splitk(env.context,&invalid,&env.stream,tile,mode,&p) == STRIX_ERROR_INVALID_ARGUMENT);
+            fail.no_work();
+            invalid = d; invalid.workspace = ws.at(4);
+            assert(strix_tp_dense_plan_create_splitk(env.context,&invalid,&env.stream,tile,mode,&p) == STRIX_ERROR_INVALID_ARGUMENT);
+            fail.no_work();
+        }
+    for (unsigned rows = 1; rows <= 8; ++rows) for (unsigned tile = 1; tile <= rows; ++tile)
+        for (unsigned mode : {0u,1u}) {
+            strix_tp_dense_pair_desc d; strix_tp_dense_pair_desc_init(&d);
+            d.input = tensor(x.pointer,rows,5120,5200);
+            d.member[0] = {qa,tensor(y0.pointer,rows,1280,1400),-.5f,.25f};
+            d.member[1] = {kv,tensor(y1.pointer,rows,512,1400),1,0};
+            d.rows_per_block = tile; d.strategy = mode;
+            uint64_t bytes = 0;
+            assert(strix_tp_dense_pair_workspace_bytes(env.context,&d,&bytes) == STRIX_SUCCESS);
+            assert(bytes == uint64_t(rows)*147456 + ((uint64_t((rows+tile-1)/tile)*14*4+255)&~uint64_t(255)));
+            Buffer ws{size_t(bytes)}; d.workspace = ws.pointer; d.workspace_bytes = bytes;
+            strix_tp_dense_pair_plan p = nullptr;
+            assert(strix_tp_dense_pair_plan_create(env.context,&d,&env.stream,&p) == STRIX_SUCCESS);
+            Counters hot; assert(strix_tp_dense_pair_plan_submit(p) == STRIX_SUCCESS); hot.hot_path(mode ? 2 : 1);
+            assert(tp_fake::split.members == 2 && !tp_fake::split.swiglu);
+            assert(strix_tp_dense_pair_plan_destroy(p) == STRIX_SUCCESS);
+            const auto saved = d.member[1].output; d.member[1].output.data = y0.pointer;
+            Counters fail; assert(strix_tp_dense_pair_plan_create(env.context,&d,&env.stream,&p) == STRIX_ERROR_INVALID_ARGUMENT); fail.no_work();
+            d.member[1].output = saved;
+            strix_tp_swiglu_desc s; strix_tp_swiglu_desc_init(&s);
+            s.input = d.input; s.gate = gate; s.up = up;
+            s.hidden_output = tensor(y0.pointer,rows,1152,1400); s.rows_per_block = tile; s.strategy = mode;
+            assert(strix_tp_swiglu_workspace_bytes(env.context,&s,&bytes) == STRIX_SUCCESS);
+            s.workspace = ws.pointer; s.workspace_bytes = ws.bytes;
+            Buffer diagnostic(size_t(rows)*1152*4);
+            s.diagnostic_gate = static_cast<float*>(diagnostic.pointer); s.diagnostic_bytes = diagnostic.bytes;
+            assert(strix_tp_swiglu_plan_create(env.context,&s,&env.stream,&p) == STRIX_SUCCESS);
+            Counters sh; assert(strix_tp_swiglu_plan_submit(p) == STRIX_SUCCESS); sh.hot_path(mode ? 2 : 1);
+            assert(tp_fake::split.swiglu && tp_fake::split.diagnostic[0] == diagnostic.pointer);
+            assert(strix_tp_swiglu_plan_destroy(p) == STRIX_SUCCESS);
+            s.diagnostic_up = s.diagnostic_gate;
+            Counters bad; assert(strix_tp_swiglu_plan_create(env.context,&s,&env.stream,&p) == STRIX_ERROR_INVALID_ARGUMENT); bad.no_work();
+            s.diagnostic_up = nullptr; s.up = s.gate;
+            const auto references = gate->plan_refs;
+            assert(strix_tp_swiglu_plan_create(env.context,&s,&env.stream,&p) == STRIX_SUCCESS);
+            assert(gate->plan_refs == references + 1);
+            assert(strix_tp_swiglu_plan_destroy(p) == STRIX_SUCCESS);
+            assert(gate->plan_refs == references);
+        }
+    for (auto w : {qa,kv,gate,up,q_projection,o_projection}) assert(strix_weights_destroy(w) == STRIX_SUCCESS);
+    auto qb = prepare(env,1152,5120,5);
+    {
+        Buffer qy(2*16420*4);
+        auto d = dense_desc(qb,2,x.pointer,qy.pointer);
+        uint64_t bytes = UINT64_MAX;
+        Counters query;
+        assert(strix_tp_dense_workspace_bytes(env.context,&d,0,&bytes) == STRIX_SUCCESS && bytes == 0);
+        query.no_work();
+        strix_tp_dense_plan p = nullptr;
+        assert(strix_tp_dense_plan_create_splitk(env.context,&d,&env.stream,0,0,&p) == STRIX_SUCCESS);
+        const auto previous = tp_fake::dense_calls;
+        Counters hot;
+        assert(strix_tp_dense_plan_submit(p) == STRIX_SUCCESS); hot.hot_path(1);
+        assert(tp_fake::dense_calls == previous+1);
+        assert(strix_tp_dense_plan_destroy(p) == STRIX_SUCCESS);
+    }
+    assert(strix_weights_destroy(qb) == STRIX_SUCCESS);
+}
+
+void dense_r1_contract() {
+    Environment env;
+    const unsigned shapes[][2]={{5120,512},{1280,16384},{4096,5120}};
+    for(const auto& shape:shapes)for(unsigned bits:{4u,5u}) {
+    const auto input=shape[0],output=shape[1];
+    auto w=prepare(env,input,output,bits);
+    {
+        Buffer x(size_t(input+17)*8*4),y(size_t(output+23)*8*4);
+        for(unsigned identity:{0u,1u}) for(unsigned rows=1;rows<=8;++rows) {
+            auto d=dense_desc(w,rows,x.at(),y.at());
+            uint64_t bytes=0;
+            Counters q;
+            assert(strix_tp_dense_r1_workspace_bytes(env.context,&d,0,identity,&bytes)==STRIX_SUCCESS);
+            q.no_work();
+            assert(bytes==strix_trellis::dense_r1_workspace(input,output,int(rows),0,identity!=0));
+            Buffer workspace(bytes);d.workspace=workspace.at();d.workspace_bytes=bytes;
+            strix_tp_dense_plan p=nullptr;
+            assert(strix_tp_dense_plan_create_r1(env.context,&d,&env.stream,0,identity,&p)==STRIX_SUCCESS);
+            assert(p && w->plan_refs==1);
+            assert(strix_weights_destroy(w)==STRIX_ERROR_INVALID_ARGUMENT);
+            for(int j=0;j<3;++j){
+                Counters hot;assert(strix_tp_dense_plan_submit(p)==STRIX_SUCCESS);hot.hot_path(1);
+                if(p->use_split) {
+                    assert(tp_fake::split.member[0].rows==int(rows));
+                    assert(tp_fake::split.member[0].weights.output==int(output));
+                } else {
+                    assert(tp_fake::r1.splits==strix_trellis::dense_r1_splits(input,output,identity!=0));
+                    assert(tp_fake::r1.projection.rows==int(rows));
+                }
+            }
+            assert(strix_tp_dense_plan_destroy(p)==STRIX_SUCCESS && w->plan_refs==0);
+            auto negative=[&](strix_matmul_desc bad,unsigned id,strix_status wanted){
+                strix_tp_dense_plan out=reinterpret_cast<strix_tp_dense_plan>(uintptr_t(1));
+                Counters before;
+                assert(strix_tp_dense_plan_create_r1(env.context,&bad,&env.stream,0,id,&out)==wanted && !out);
+                before.no_work();
+            };
+            auto bad=d;bad.workspace_bytes=bytes-1;negative(bad,identity,STRIX_ERROR_INSUFFICIENT_BUFFER);
+            bad=d;bad.workspace=x.at();negative(bad,identity,STRIX_ERROR_INVALID_ARGUMENT);
+            bad=d;bad.output.data=x.at();negative(bad,identity,STRIX_ERROR_INVALID_ARGUMENT);
+            negative(d,2,STRIX_ERROR_INVALID_ARGUMENT);
+            tp_fake::supported=false;negative(d,identity,STRIX_ERROR_UNSUPPORTED_DEVICE);tp_fake::supported=true;
+        }
+    }
+    assert(strix_weights_destroy(w)==STRIX_SUCCESS);
+    }
+}
 #ifdef STRIX_TP_API_NO_MAIN
 int tp_api_contract_main() {
 #else
@@ -662,6 +870,8 @@ int main() {
         idle.no_work();
     }
 #endif
+    dense_r1_contract();
+    dense_split_contract();
     dense_positive(); dense_negative();
     {
         Environment env;

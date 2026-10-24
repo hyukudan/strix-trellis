@@ -20,7 +20,7 @@ pipeline_activation(const TpMoeLaunch &l, unsigned row, unsigned slot,
   return base + tp_moe_pipeline_activation_index(row, slot, down, projection);
 }
 
-#ifdef STRIX_TRELLIS_TP_MOE_PREPARE_ROUTES
+#ifdef STRIX_TRELLIS_TP_MOE_ROUTE_MAPS
 __device__ __forceinline__ TpMoeDeviceRows* pipeline_maps(const TpMoeLaunch& l, bool down) {
   auto* base = reinterpret_cast<TpMoeDeviceRows*>(
       reinterpret_cast<unsigned char*>(l.partials) +
@@ -41,6 +41,14 @@ __device__ __forceinline__ bool pipeline_resolve(const TpMoeLaunch& l,
 #ifdef STRIX_TRELLIS_TP_MOE_PREPARE_ROUTES
   map = pipeline_maps(l, down)[candidate];
   return map.row_count != 0;
+#elif defined(STRIX_TRELLIS_TP_MOE_DEVICE_ROUTE_MAPS)
+  // Device routes change between replays: one prepare kernel per replay maps
+  // them once instead of in every core CTA. Host tables are resolved in place.
+  if (l.bank) {
+    map = pipeline_maps(l, down)[candidate];
+    return map.row_count != 0;
+  }
+  return resolve(l, map, down, candidate);
 #else
   return resolve(l, map, down, candidate);
 #endif
@@ -249,6 +257,32 @@ pipeline_project(const DeviceWeights &w, const TpMoeLaunch &l,
     pipeline_dot<3, Rows, Down>(w, l, m, projection, tile, split);
 }
 
+#if STRIX_TRELLIS_TP_MOE_ROW_CAP > 0
+// Row groups in chunks of at most Chunk rows. Splitting repeats decode but
+// preserves every output chain. Shared by the chunked core and the small-row
+// path of the merged device core so both compile the same code.
+template <unsigned Chunk, bool Down>
+__device__ __forceinline__ void
+pipeline_project_chunked(const DeviceWeights &w, const TpMoeLaunch &l,
+                         const TpMoeDeviceRows &m, unsigned projection) {
+  for (unsigned first = 0; first < m.row_count; first += Chunk) {
+    TpMoeDeviceRows slice{};
+    slice.bank_index = m.bank_index;
+    slice.row_count = min(Chunk, m.row_count - first);
+#pragma unroll
+    for (unsigned row = 0; row < Chunk; ++row) {
+      const unsigned source = first + (row < slice.row_count ? row : 0);
+      slice.token_rows[row] = m.token_rows[source];
+      slice.route_slots[row] = m.route_slots[source];
+    }
+    if (slice.row_count == 1)
+      pipeline_project<1, Down>(w, l, slice, projection);
+    else
+      pipeline_project<Chunk, Down>(w, l, slice, projection);
+  }
+}
+#endif
+
 template <int Capacity, bool Down, int RowClass = 0>
 __global__ __launch_bounds__(tp_moe_pipeline_core_threads) void pipeline_core(TpMoeLaunch l) {
   __shared__ TpMoeDeviceRows m;
@@ -275,33 +309,55 @@ __global__ __launch_bounds__(tp_moe_pipeline_core_threads) void pipeline_core(Tp
   // Separate the numerical row core from the window's maximum capacity.
   // Splitting row groups repeats decode but preserves every output chain.
   constexpr unsigned Chunk = STRIX_TRELLIS_TP_MOE_ROW_CAP;
-  if constexpr (RowClass == 2) {
+  if constexpr (RowClass == 3) {
+    // Merged classes: the same small-row arithmetic as class 1, chosen per CTA.
+    if (m.row_count <= 2) {
+      pipeline_project_chunked<Chunk, Down>(w, l, m, projection);
+      return;
+    }
+#ifdef STRIX_TRELLIS_TP_MOE_DEVICE_MERGED_DOWN_CAP4
+    if constexpr (Down) {
+      // Four-row chunks keep the merged down core within the occupancy of the
+      // separate small-row core; each output keeps its own S4 chain.
+      for (unsigned first = 0; first < m.row_count; first += 4) {
+        TpMoeDeviceRows slice{};
+        slice.bank_index = m.bank_index;
+        slice.row_count = min(4u, m.row_count - first);
+#pragma unroll
+        for (unsigned row = 0; row < 4; ++row) {
+          const unsigned source = first + (row < slice.row_count ? row : 0);
+          slice.token_rows[row] = m.token_rows[source];
+          slice.route_slots[row] = m.route_slots[source];
+        }
+        if (slice.row_count == 1)
+          pipeline_project<1, Down>(w, l, slice, projection);
+        else if (slice.row_count == 2)
+          pipeline_project<2, Down>(w, l, slice, projection);
+        else
+          pipeline_project<4, Down>(w, l, slice, projection);
+      }
+      return;
+    }
+#endif
+  }
+  if constexpr (RowClass >= 2) {
     // Keep all rows of a shared expert together, without raising the register
-    // allocation of the separate one/two-row kernel.
-    if (m.row_count <= 4)
+    // allocation of the separate one/two-row kernel. A capacity-4 image (at most
+    // four rows per window) does not contain the eight-row core.
+    if constexpr (Capacity >= 8) {
+      if (m.row_count <= 4)
+        pipeline_project<4, Down>(w, l, m, projection);
+      else
+        pipeline_project<8, Down>(w, l, m, projection);
+    } else
       pipeline_project<4, Down>(w, l, m, projection);
-    else
-      pipeline_project<8, Down>(w, l, m, projection);
   } else if constexpr (Capacity <= Chunk) {
     if (m.row_count == 1)
       pipeline_project<1, Down>(w, l, m, projection);
     else
       pipeline_project<Capacity, Down>(w, l, m, projection);
-  } else for (unsigned first = 0; first < m.row_count; first += Chunk) {
-    TpMoeDeviceRows slice{};
-    slice.bank_index = m.bank_index;
-    slice.row_count = min(Chunk, m.row_count - first);
-#pragma unroll
-    for (unsigned row = 0; row < Chunk; ++row) {
-      const unsigned source = first + (row < slice.row_count ? row : 0);
-      slice.token_rows[row] = m.token_rows[source];
-      slice.route_slots[row] = m.route_slots[source];
-    }
-    if (slice.row_count == 1)
-      pipeline_project<1, Down>(w, l, slice, projection);
-    else
-      pipeline_project<Chunk, Down>(w, l, slice, projection);
-  }
+  } else
+    pipeline_project_chunked<Chunk, Down>(w, l, m, projection);
 #else
   if (m.row_count == 1)
     pipeline_project<1, Down>(w, l, m, projection);
@@ -420,8 +476,12 @@ hipError_t pipeline_launch(const TpMoeLaunch &l, hipStream_t stream,
   const unsigned owners = l.bank ? l.rows * 6 : l.expert_count;
   constexpr unsigned Width = Down ? 1152 : 5120;
   auto status = hipSuccess;
+#ifdef STRIX_TRELLIS_TP_MOE_ROUTE_MAPS
 #ifdef STRIX_TRELLIS_TP_MOE_PREPARE_ROUTES
   if (prepare) {
+#else
+  if (prepare && l.bank) {
+#endif
     pipeline_prepare_routes<<<dim3(1, owners, 2), 32, 0, stream>>>(l);
     status = hipGetLastError();
     if (status != hipSuccess) return status;
@@ -451,6 +511,12 @@ hipError_t pipeline_launch(const TpMoeLaunch &l, hipStream_t stream,
   else if (l.rows == 2)
     pipeline_core<2, Down><<<grid, tp_moe_pipeline_core_threads, 0, stream>>>(l);
 #ifdef STRIX_TRELLIS_TP_MOE_ADAPTIVE_ROWS
+#ifdef STRIX_TRELLIS_TP_MOE_DEVICE_MERGED_CLASSES
+  else if (l.bank && l.rows <= 4)
+    pipeline_core<4, Down, 3><<<grid, tp_moe_pipeline_core_threads, 0, stream>>>(l);
+  else if (l.bank)
+    pipeline_core<8, Down, 3><<<grid, tp_moe_pipeline_core_threads, 0, stream>>>(l);
+#endif
   else {
     const unsigned classes = l.bank ? 3u : Down ? l.down_row_classes : l.gate_row_classes;
     if (classes & 1u) {

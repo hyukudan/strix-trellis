@@ -195,7 +195,8 @@ void compare(const std::string& label, const std::vector<float>& actual,
 void exact(const std::vector<float>& a, const std::vector<float>& b, const char* reason) {
     require(a.size() == b.size() && std::memcmp(a.data(), b.data(), a.size() * sizeof(float)) == 0, reason);
 }
-void measure(Runtime& rt, const std::string& label, const std::function<void()>& call, int repetitions) {
+void measure(Runtime& rt, const std::string& label, const std::function<void()>& call, int repetitions,
+             const char* protocol = "hot_fixed_addresses") {
     hipEvent_t begin{}, end{}; hip_ok(hipEventCreate(&begin)); hip_ok(hipEventCreate(&end));
     std::vector<double> host, gpu, completion;
     for (int sweep = -1; sweep < 11; ++sweep) {
@@ -218,8 +219,8 @@ void measure(Runtime& rt, const std::string& label, const std::function<void()>&
     }
     hip_ok(hipEventDestroy(begin)); hip_ok(hipEventDestroy(end));
     std::sort(host.begin(), host.end()); std::sort(gpu.begin(), gpu.end()); std::sort(completion.begin(), completion.end());
-    std::printf("TP_RESULT %s protocol=hot_fixed_addresses samples=11 host_median_us=%.9g gpu_median_us=%.9g completion_median_us=%.9g\n",
-                label.c_str(), host[5], gpu[5], completion[5]);
+    std::printf("TP_RESULT %s protocol=%s samples=11 host_median_us=%.9g gpu_median_us=%.9g completion_median_us=%.9g\n",
+                label.c_str(), protocol, host[5], gpu[5], completion[5]);
 }
 void dense_case(Runtime& rt, const Fixture& fixture, const std::string& site, int repetitions) {
     require(!fixture.moe && (fixture.bits == 4 || fixture.bits == 5), "Dense probe needs K4/K5 fixtures");

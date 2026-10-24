@@ -8,6 +8,17 @@ session on the same machine.
 
 ## Unreleased — 2026-10-24
 
+- Direct-output R8 GEMV (`q_b`, `o_b`, shared down and output head):
+  each K16 step decodes its four weight pairs first and issues the dot
+  products of the two independent chains of every row alternately, with the
+  activation as the first operand (`STRIX_TRELLIS_DIRECT_DUAL_ISSUE`, ON).
+  Same bits (native DOT2 is symmetric in its multiplicands; every chain keeps
+  its order). With the current compiler the hot loop has 15 instead of 10-11
+  dual-issue dot instructions and 65 instead of 69-70 VALU instructions.
+  Isolated operator, three repetitions, outputs bit-identical in all 50
+  cells: EAQ `q_b` R8 152.40 -> 151.58 µs (paired -0.47 to -1.12 %),
+  shared down R8 -0.62 %, `o_b` R8 -0.22 %; no cell met the pre-registered
+  regression criterion. OFF keeps the previous order.
 - Direct-output R8 GEMV kernels advance the weight tile pointer per K16 row
   instead of recomputing it; 11–12 fewer instructions per inner iteration with
   the current compiler, bit-identical outputs. Benchmarks print `output_fnv`,

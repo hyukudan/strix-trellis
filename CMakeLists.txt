@@ -5,6 +5,7 @@ option(STRIX_TRELLIS_ENABLE_HIP "Build available HIP programs" OFF)
 option(STRIX_TRELLIS_BUILD_TESTING "Build CPU contract checks" ON)
 option(STRIX_TRELLIS_BUILD_BENCHMARKS "Build optional HIP benchmark programs" OFF)
 option(STRIX_TRELLIS_BUILD_EXPERIMENTAL_K2_LOCAL "Build opt-in K2 intra-block reduction qualification" OFF)
+option(STRIX_TRELLIS_DIRECT_DUAL_ISSUE "Direct-output R8 GEMV: dot products ordered for dual issue (same bits)" ON)
 # Pretransformed expert pipeline (STRIX_TRELLIS_TP_MOE_PIPELINED_K2, OFF by default).
 # The defaults below are its qualified configuration, bitwise equal to the S4
 # operator (docs/experimental-k2-lean.md). ADAPTIVE_ROWS stays OFF: it is faster
@@ -203,6 +204,9 @@ if(STRIX_TRELLIS_ENABLE_HIP)
     add_library(strix_trellis::runtime ALIAS strix_trellis)
     target_include_directories(strix_trellis PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
     target_compile_options(strix_trellis PRIVATE -O3 -ffp-contract=off)
+    if(STRIX_TRELLIS_DIRECT_DUAL_ISSUE)
+      target_compile_definitions(strix_trellis PRIVATE STRIX_TRELLIS_DIRECT_DUAL_ISSUE=1)
+    endif()
     target_link_libraries(strix_trellis PUBLIC hip::host)
     if(STRIX_TRELLIS_ENABLE_EXPERIMENTAL_TP)
       target_compile_definitions(strix_trellis PRIVATE STRIX_TRELLIS_ENABLE_EXPERIMENTAL_TP=1)

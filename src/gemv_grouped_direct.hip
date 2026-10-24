@@ -44,6 +44,25 @@ __global__ __launch_bounds__(256*Groups) void grouped(const uint32_t* __restrict
                 av[r][0]=__builtin_bit_cast(Pair,activation[g][r*64+kk*8+(lane&3)]);
                 av[r][1]=__builtin_bit_cast(Pair,activation[g][r*64+kk*8+(lane&3)+4]);
             }
+#ifdef STRIX_TRELLIS_DIRECT_DUAL_ISSUE
+            // Decode all four pairs, then issue the two independent chains of every row
+            // alternately (acc[r][0]: pairs 0 then 1, acc[r][1]: pairs 2 then 3, as before).
+            // The activation is the first fdot2 operand: native gfx11 DOT2 is symmetric in its
+            // two multiplicands (alignment, truncation and special values included), so the
+            // result is unchanged. This order lets the compiler pair the dot products into
+            // dual-issue instructions.
+            const Pair weight[4]={
+                __builtin_bit_cast(Pair,packed_decode::mul1_half2(reader.template state<0>(),reader.template state<1>())),
+                __builtin_bit_cast(Pair,packed_decode::mul1_half2(reader.template state<2>(),reader.template state<3>())),
+                __builtin_bit_cast(Pair,packed_decode::mul1_half2(reader.template state<4>(),reader.template state<5>())),
+                __builtin_bit_cast(Pair,packed_decode::mul1_half2(reader.template state<6>(),reader.template state<7>()))};
+            #pragma unroll
+            for(int p:{0,2,1,3}) {
+                #pragma unroll
+                for(int r=0;r<8;++r)
+                    acc[r][p/2]=__builtin_amdgcn_fdot2(av[r][p&1],weight[p],acc[r][p/2],false);
+            }
+#else
             #pragma unroll
             for(int p=0;p<4;++p) {
                 uint32_t first,second;
@@ -56,6 +75,7 @@ __global__ __launch_bounds__(256*Groups) void grouped(const uint32_t* __restrict
                 for(int r=0;r<8;++r)
                     acc[r][p/2]=__builtin_amdgcn_fdot2(weight,av[r][p&1],acc[r][p/2],false);
             }
+#endif
         }
         __syncthreads();
     }

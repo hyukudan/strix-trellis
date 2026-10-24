@@ -90,6 +90,25 @@ uint64_t generic_bytes(Runtime& rt, strix_weights w) {
     }
     return best;
 }
+// Workspace and strix_gemv for any projection shape (I1 -> N1), rows contiguous.
+uint64_t generic_bytes_shape(Runtime& rt, strix_weights w, int I1, int N1) {
+    uint64_t best = 256;
+    for (int r = 1; r <= 8; ++r) {
+        strix_matmul_desc d{}; strix_matmul_desc_init(&d); d.weights = w;
+        d.input = tensor(reinterpret_cast<void*>(uintptr_t{1} << 40), size_t(r) * I1 * 4, r, I1, size_t(I1));
+        d.output = tensor(reinterpret_cast<void*>(uintptr_t{1} << 41), size_t(r) * N1 * 4, r, N1, size_t(N1));
+        uint64_t b = 0; api_ok(strix_matmul_workspace_bytes(rt.context, &d, &b), "generic workspace query");
+        best = std::max(best, (b + 255) & ~uint64_t{255});
+    }
+    return best;
+}
+void gemv_shape(Runtime& rt, strix_weights w, const float* x, float* y, int rows, int I1, int N1, void* ws, uint64_t wsb) {
+    strix_matmul_desc d{}; strix_matmul_desc_init(&d); d.weights = w;
+    d.input = tensor(x, size_t(rows) * I1 * 4, rows, I1, size_t(I1));
+    d.output = tensor(y, size_t(rows) * N1 * 4, rows, N1, size_t(N1));
+    d.workspace = ws; d.workspace_bytes = wsb;
+    api_ok(strix_gemv(rt.context, &d, &rt.descriptor), "strix_gemv");
+}
 // y (contiguous [rows][N]) = strix_gemv over the rows of x (stride xs)
 void gemv(Runtime& rt, strix_weights w, const float* x, size_t xs, float* y, int rows, void* ws, uint64_t wsb) {
     strix_matmul_desc d{}; strix_matmul_desc_init(&d); d.weights = w;
@@ -196,7 +215,9 @@ int check() {
 double timed(Runtime& rt, const std::function<void(int)>& call, int copies, int repeats) {
     hipEvent_t b{}, e{}; hip_ok(hipEventCreate(&b)); hip_ok(hipEventCreate(&e));
     std::vector<double> v;
-    for (int s = -1; s < 7; ++s) {
+    const char* sw = std::getenv("PROBE_SWEEPS");  // timed sweeps after one discarded sweep (default 7)
+    const int sweeps = sw ? std::max(1, std::atoi(sw)) : 7;
+    for (int s = -1; s < sweeps; ++s) {
         hip_ok(hipEventRecord(b, rt.stream));
         for (int k = 0; k < repeats; ++k) call(k % copies);
         hip_ok(hipEventRecord(e, rt.stream)); hip_ok(hipEventSynchronize(e));
@@ -211,7 +232,12 @@ double timed(Runtime& rt, const std::function<void(int)>& call, int copies, int 
 int tune(int bits, const std::vector<int>& row_list) {
     using namespace strix_trellis;
     Runtime rt;
-    constexpr int G = 4, copies = 8;
+    constexpr int G = 4;
+    // Weight copies rotate over PROBE_ROTATE_MB when set (default 8 copies of the group).
+    const char* rot = std::getenv("PROBE_ROTATE_MB");
+    const size_t group_bytes = size_t(G) * I * N * bits / 8;
+    const int copies = rot ? int(std::max<size_t>(8, (size_t(std::atoi(rot)) << 20) / group_bytes + 1)) : 8;
+    std::printf("GROUP_ROTATION bits=%d copies=%d bytes=%zu\n", bits, copies, size_t(copies) * group_bytes);
     std::vector<std::unique_ptr<Weight>> ws;
     for (int c = 0; c < copies * G; ++c) ws.push_back(std::make_unique<Weight>(rt, bits, uint32_t(c + 1)));
     const uint64_t gb = generic_bytes(rt, ws[0]->handle);
@@ -255,10 +281,18 @@ int tune(int bits, const std::vector<int>& row_list) {
         Buffer work(256 * size_t(copies) + member * G * copies);
         hip_ok(hipMemset(work.data, 0, work.bytes)); hip_ok(hipDeviceSynchronize());
         double best = 1e30; std::string best_s;
+        // The schedule the public grouped plan selects (dense_r1_policy.hpp).
+        const auto pol = dense_r1_group_schedule(I, N, bits, rows, splits);
+        const bool pol_pipe = dense_r1_group_pipelined(I, N, bits, rows, splits);
+        std::printf("GROUP_POLICY bits=%d rows=%d pipe=%d cols=%d outs=%d u=%d\n", bits, rows, pol_pipe ? 1 : 0, pol.columns,
+                    pol.outputs_per_wave, pol.prefetch);
+        const bool policy_only = std::getenv("PROBE_POLICY_ONLY") != nullptr;
         for (int pipe : {0, 1})
         for (int cols : {16, 32, 64, 128})
             for (int outs : {16, 8})
                 for (int u : {1, 2, 4}) {
+                    if (policy_only && (pipe != (pol_pipe ? 1 : 0) || cols != pol.columns || outs != pol.outputs_per_wave || u != pol.prefetch))
+                        continue;
                     std::vector<DenseR1Group> grp(copies);
                     for (int c = 0; c < copies; ++c)
                         for (int g = 0; g < G; ++g) {
@@ -324,9 +358,25 @@ int tune1(int I1, int N1, int bits, const std::vector<int>& row_list) {
         const auto expect = y.download();
         const double t_policy = timed(rt, [&](int c) { api_ok(strix_tp_dense_plan_submit(plans[size_t(c)]), "submit"); }, copies, 64);
         const auto pol = dense_r1_schedule(I1, N1, bits, rows, splits);
-        std::printf("TUNE1_POLICY I=%d N=%d bits=%d rows=%d sched={%d,%d,%d,%s} us=%.2f GBps=%.1f\n", I1, N1, bits, rows, pol.columns,
-                    pol.prefetch, pol.outputs_per_wave, pol.use_splitk04 ? "splitk04" : "r1", t_policy, double(wbytes) / (t_policy * 1e3));
+        std::printf("TUNE1_POLICY I=%d N=%d bits=%d rows=%d copies=%d rotation_bytes=%zu sched={%d,%d,%d,%s} us=%.2f GBps=%.1f\n", I1, N1, bits,
+                    rows, copies, size_t(copies) * wbytes, pol.columns, pol.prefetch, pol.outputs_per_wave,
+                    pol.use_splitk04 ? "splitk04" : "r1", t_policy, double(wbytes) / (t_policy * 1e3));
         for (auto p : plans) (void)strix_tp_dense_plan_destroy(p);
+        {
+            // Generic strix_gemv over the same copies; the LEGACY plan must reproduce its bytes.
+            const uint64_t gb = generic_bytes_shape(rt, ws[0]->handle, I1, N1);
+            Buffer gws(std::max<uint64_t>(gb, 256)), yg(y.bytes);
+            hip_ok(hipMemset(yg.data, 0xa5, yg.bytes)); hip_ok(hipDeviceSynchronize());
+            gemv_shape(rt, ws[0]->handle, x.f(), yg.f(), rows, I1, N1, gws.data, gb);
+            hip_ok(hipStreamSynchronize(rt.stream));
+            const bool same = yg.download() == expect;
+            const double t_gemv = timed(rt, [&](int c) { gemv_shape(rt, ws[size_t(c)]->handle, x.f(), yg.f(), rows, I1, N1, gws.data, gb); },
+                                        copies, 64);
+            if (!same) ++failures;
+            std::printf("TUNE1_BASE I=%d N=%d bits=%d rows=%d gemv_us=%.2f GBps=%.1f plan_equals_gemv=%d\n", I1, N1, bits, rows, t_gemv,
+                        double(wbytes) / (t_gemv * 1e3), same ? 1 : 0);
+        }
+        if (std::getenv("PROBE_POLICY_ONLY")) { std::fflush(stdout); continue; }
         const size_t partial = (size_t(splits) * rows * N1 * 4 + 255) & ~size_t(255), member = partial + ((size_t(N1 / 128) * 4 + 255) & ~size_t(255));
         Buffer work(member * size_t(copies));
         hip_ok(hipMemset(work.data, 0, work.bytes)); hip_ok(hipDeviceSynchronize());

@@ -4,6 +4,10 @@ This opt-in path adds physical output tiling to a single-dispatch split-K
 projection. It does not change generic GEMV, TP03, or the existing split-K API.
 Build with `STRIX_TRELLIS_ENABLE_EXPERIMENTAL_TP=ON`.
 
+Status: in use at the DeepSeek V4.1 Flash attention sites of an
+inference engine, gated end to end on two ranks; operator timings are in the
+[README](../README.md#dense-r1-tp-plans-decode-one-rank).
+
 ## Numerical identities
 
 `STRIX_DENSE_R1_S4` retains four complete K16 accumulator chains, including

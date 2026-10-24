@@ -7,13 +7,15 @@ option disabled, the new functions, except initializers, return
 `STRIX_ERROR_NOT_IMPLEMENTED`. Normal GEMV/GEMM dispatch and the earlier grouped
 API retain their selection rules.
 
-**Status: implementation, CPU checks and HIP compilation. The K2 expert
-split plans with the lean core are qualified bitwise on the GPU and measured
-as an isolated operator (see the README and
-[experimental-k2-lean.md](experimental-k2-lean.md)); the other native
-correctness and performance checks are pending.** The kernel, copy and memory
-counts described here are code properties and contracts checked by the native
-probe, not GPU results already obtained.
+**Status (see the [README status table](../README.md#status)):** the dense
+rank paths, the dense R1 plans ([DENSE_R1.md](DENSE_R1.md)) and the grouped
+GEMV are in use in an inference engine at every DeepSeek V4.1
+Flash attention site, gated end to end on two ranks. The K2 expert split plans
+and pipeline are bitwise qualified on the GPU and measured as an isolated
+operator (see the README and
+[experimental-k2-lean.md](experimental-k2-lean.md)). The kernel, copy and
+memory counts described here are code properties and contracts checked by the
+native probe; GPU results are only those reported in the README.
 
 ## 1. Dense K4/K5, R1 to R8
 

@@ -45,6 +45,16 @@ session on the same machine.
   | Grouped `o_a`, R1 | 108.5 µs as four separate calls; 54.8 µs grouped | 51.6 µs |
   | Grouped `o_a`, R6 | 141.8 µs as four separate calls; 77.9 µs grouped | 68.4 µs |
   | `o_b` K4, R5/R6 | 70.3 µs | 62.6 µs |
+- README: all performance tables re-measured on `892b26e` with the V16 method,
+  next to the V16 build in the same session, with a "% of read ceiling" column
+  (246.7 GB/s, a streaming-read kernel measured in the same session) and a
+  "% of call floor" column. New tables for the dense R1 plans, the grouped
+  `o_a` GEMV and the K2 expert block (pipeline off against default, cold and
+  hot).
+- `tests/dense_r1_group_probe.hip`: `PROBE_ROTATE_MB`, `PROBE_SWEEPS` and
+  `PROBE_POLICY_ONLY` select the rotation size, the sweep count and a
+  policy-only run; `tune1` also times `strix_gemv` over the same copies and
+  checks that the plan output equals it bit for bit.
 
 ## 2026-10-23
 

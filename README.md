@@ -13,10 +13,14 @@ AMD Strix Halo (`gfx1151`, RDNA 3.5, wave32). It provides:
 The decode, GEMV, GEMM and transform kernels are written from scratch. See
 [Background and credits](#background-and-credits).
 
-> **Status: experimental.** The C ABI is at version 1 and the library is at
-> 0.3.0. Some paths are qualified on hardware; newer paths are implemented and
-> pass CPU contract tests but have not yet been measured on the GPU.
-> The [status table](#status) separates the two.
+> **Status: in use, with experimental parts.** The dense paths (the mix-B
+> dense layers and every attention projection) run inside a DeepSeek V4.1
+> Flash inference engine on two Strix Halo nodes, gated bit for bit end to end
+> against that engine's reference. The K2 expert paths are measured on the GPU
+> at operator level, bit-exact, but are not yet used in a full model. A few
+> paths are CPU-tested only. The C ABI is at version 1 and the library is at
+> 0.3.0. The [status table](#status) gives the level and the evidence for each
+> component.
 
 ## Target model
 
@@ -86,20 +90,28 @@ for one decoded token.
 
 ## Status
 
-| Component | State |
-|---|---|
-| CPU reference (`python/strix_trellis`) | Exact decode for the `3inst`, `mcg` and `mul1` codebooks; integer rates 1–8 bits, plus 1.5 / 2.5 / 3.5 bits for `mul1`. Matches the EXL3 reference CUDA kernels bit for bit on 2,621,440 real weights and on all 65,536 states of each codebook. |
-| Loader | safetensors, mmap per group: `trellis`, `suh`, `svh`, codebook marker, optional bias. Exports borrowed regions or a reusable buffer. Rejects external `out_scales` and older formats without an explicit scale contract. |
-| HIP runtime, dense GEMV R1–R8 and WMMA GEMM | **Qualified on hardware** (campaign V16, see [Measured performance](#measured-performance)). |
-| Prepared plans (`strix_linear_plan_*`) and region upload (`strix_weights_prepare_parts`) | Implemented in 0.2. CPU contract tests pass; GPU run pending. |
-| K2 R1 local-reduction kernel | Implemented, off by default (`STRIX_TRELLIS_BUILD_EXPERIMENTAL_K2_LOCAL`). GPU qualification pending. See [K2_LOCAL.md](docs/K2_LOCAL.md). |
-| TP rank APIs (`strix_tp_dense_*`, `strix_tp_moe_*`) | Implemented in 0.3, off by default (`STRIX_TRELLIS_ENABLE_EXPERIMENTAL_TP`). CPU contract tests pass and the HIP build compiles. See [TP_RANK.md](docs/TP_RANK.md). |
-| Dense R1 TP plans and grouped GEMV (`strix_tp_dense_plan_create_r1`, `strix_tp_dense_pair_plan_create_r1`, `strix_grouped_gemv_plan_*`) | Experimental (behind `STRIX_TRELLIS_ENABLE_EXPERIMENTAL_TP`). Exact-order split-K with S4 or LEGACY identities, bitwise reproducible per row; grouped plans match `strix_gemv` R1 bits per row. Schedules come from cold sweeps; see [DENSE_R1.md](docs/DENSE_R1.md) and the CHANGELOG. |
-| K2 expert split plans, lean core (`strix_tp_moe_plan_create_split`, `STRIX_TRELLIS_TP_MOE_PIPELINED_K2`) | Experimental (behind `STRIX_TRELLIS_ENABLE_EXPERIMENTAL_TP`); the pipeline and its measured configuration are on by default. Bitwise equal to the 0.3 expert operator on GPU fixtures and to a lane-exact CPU reference; operator timings below. Full-model qualification pending. See [experimental-k2-lean.md](docs/experimental-k2-lean.md). |
-| K2 A8R expert arithmetic (`STRIX_TRELLIS_TP_MOE_A8R`) | Experimental, compiled out by default. A distinct arithmetic identity, **not** bitwise equal to the S4 path; not measured here. See [experimental-a8r.md](docs/experimental-a8r.md). |
-| Grouped MoE (`strix_grouped_moe`) | Works, one stream over groups; no performance work. |
-| Python HIP bindings | None. Python provides the reference and weight transport; C/C++ drives the GPU. |
-| Full model inference | Not provided. The library supplies linear operators to an inference engine. |
+Three levels are used below. **In use**: runs inside a full DeepSeek V4.1
+Flash engine on two Strix Halo nodes and is gated end to end (bit-identical
+tokens and logits against the engine's reference) and timed there.
+**Measured on GPU**: bit-exact against the CPU reference or the previous
+operator on hardware, with operator timings, but not yet used in a full
+model. **CPU-tested**: implemented and covered by CPU contract tests only.
+
+| Component | Level | Evidence |
+|---|---|---|
+| CPU reference (`python/strix_trellis`) | Reference | Exact decode for the `3inst`, `mcg` and `mul1` codebooks; integer rates 1–8 bits, plus 1.5 / 2.5 / 3.5 bits for `mul1`. Matches the EXL3 reference CUDA kernels bit for bit on 2,621,440 real weights and on all 65,536 states of each codebook. |
+| Loader | In use | safetensors, mmap per group: `trellis`, `suh`, `svh`, codebook marker, optional bias. Exports borrowed regions or a reusable buffer. Rejects external `out_scales` and older formats without an explicit scale contract. |
+| HIP runtime, dense GEMV R1–R8 and WMMA GEMM | **In use** | mix-B dense layers (shared expert, output head) of the DeepSeek V4.1 Flash engine. Operator qualification: campaign V16, see [Measured performance](#measured-performance). |
+| Region upload (`strix_weights_prepare_parts`) | **In use** | Weight upload path of the engine loaders. |
+| Prepared plans (`strix_linear_plan_*`) | CPU-tested | Implemented in 0.2; no separate GPU qualification yet. |
+| Dense TP rank API (`strix_tp_dense_*`), dense R1 TP plans and grouped GEMV (`strix_tp_dense_plan_create_r1`, `strix_tp_dense_pair_plan_create_r1`, `strix_grouped_gemv_plan_*`) | **In use** (build option `STRIX_TRELLIS_ENABLE_EXPERIMENTAL_TP`) | Every attention projection (`q_a`‖`kv`, `q_b`, grouped `o_a`, `o_b`) of the DeepSeek V4.1 Flash engine runs through these plans. 40-layer bit-identical gate and A/B on hardware, 2026-10-24: greedy decode 34.7 → 30.6 ms/token, 6-token verify window 63.3 → 58.9 ms, 8 streams 85.4 → 83.6 ms/step. Exact-order split-K with S4 or LEGACY identities; grouped plans match `strix_gemv` R1 bits per row. See [DENSE_R1.md](docs/DENSE_R1.md). |
+| K2 expert split plans, lean core, pipeline (`strix_tp_moe_plan_create_split`, `STRIX_TRELLIS_TP_MOE_PIPELINED_K2`) | **Measured on GPU** (build option `STRIX_TRELLIS_ENABLE_EXPERIMENTAL_TP`) | Bitwise equal to the 0.3 expert operator on GPU fixtures (24/24 cases, K2 and K2/K3) and to a lane-exact CPU reference; the pipeline with its measured configuration is on by default and was never slower than the non-pipelined operator in any measured cell. Not yet used in a full model (the engine's routed experts use another format). See [experimental-k2-lean.md](docs/experimental-k2-lean.md). |
+| MoE TP rank API (`strix_tp_moe_*`) | Measured on GPU | Through the K2 split plans above. See [TP_RANK.md](docs/TP_RANK.md). |
+| K2 R1 local-reduction kernel | CPU-tested | Off by default (`STRIX_TRELLIS_BUILD_EXPERIMENTAL_K2_LOCAL`). See [K2_LOCAL.md](docs/K2_LOCAL.md). |
+| K2 A8R expert arithmetic (`STRIX_TRELLIS_TP_MOE_A8R`) | Experimental | Compiled out by default. A distinct arithmetic identity, **not** bitwise equal to the S4 path; not measured here. See [experimental-a8r.md](docs/experimental-a8r.md). |
+| Grouped MoE (`strix_grouped_moe`) | Works | One stream over groups; no performance work. |
+| Python HIP bindings | None | Python provides the reference and weight transport; C/C++ drives the GPU. |
+| Full model inference | Not provided | The library supplies linear operators to an inference engine. |
 
 "Implemented" does not mean "faster". Speed is claimed only for measured paths.
 

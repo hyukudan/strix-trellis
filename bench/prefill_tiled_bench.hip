@@ -101,9 +101,9 @@ template<class F> static double time_us(F launch, int reps = 9) {
 
 
 static int failures = 0;
-// TRPF_TILE_LIST="0,4" restricts the timed tiles (bitwise checks always cover every tile).
+// STRIX_BENCH_TILE_LIST="0,4" restricts the timed tiles (bitwise checks always cover every tile).
 static bool tile_selected(int tile) {
-    const char* list = std::getenv("TRPF_TILE_LIST");
+    const char* list = std::getenv("STRIX_BENCH_TILE_LIST");
     if (!list || !*list) return true;
     std::string l = std::string(",") + list + ",";
     return l.find("," + std::to_string(tile) + ",") != std::string::npos;
@@ -314,8 +314,8 @@ static void linear_cell(const std::string& name, std::vector<std::unique_ptr<Wei
     std::fflush(stdout);
 }
 static void linear_mode(const std::vector<int>& ms, const std::vector<std::string>& fx, bool synth) {
-    // Warm by default (compute-bound: warm and cold sweeps agree); TRPF_COLD=1 rotates >= 256 MiB of copies.
-    const bool cold = std::getenv("TRPF_COLD") && std::strcmp(std::getenv("TRPF_COLD"), "1") == 0;
+    // Warm by default (compute-bound: warm and cold sweeps agree); STRIX_BENCH_COLD=1 rotates >= 256 MiB of copies.
+    const bool cold = std::getenv("STRIX_BENCH_COLD") && std::strcmp(std::getenv("STRIX_BENCH_COLD"), "1") == 0;
     auto rotate = [cold](std::vector<std::unique_ptr<Weights>>& c, auto make, size_t bytes) {
         c.push_back(make()); while (cold && c.size() * bytes < (256ull << 20)) c.push_back(make()); };
     for (auto& path : fx) {
@@ -353,7 +353,7 @@ int main(int argc, char** argv) {
         std::vector<int> ms; std::vector<std::string> fx; bool files = false;
         for (int k = 2; k < argc; ++k) { std::string a = argv[k]; if (a == "--") files = true; else if (files) fx.push_back(a); else ms.push_back(std::atoi(a.c_str())); }
         if (ms.empty()) ms = {128, 256, 512, 1024, 2048, 4096};
-        const char* t = std::getenv("TRPF_TILES"); int tiles = t ? std::atoi(t) : 8;
+        const char* t = std::getenv("STRIX_BENCH_TILES"); int tiles = t ? std::atoi(t) : 8;
         for (auto& p : fx) sweep_fixture(p, ms, tiles, mode == "cold");
     }
     std::printf("{\"result\":\"%s\",\"failures\":%d}\n", failures ? "FAIL" : "PASS", failures);

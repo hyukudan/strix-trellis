@@ -8,6 +8,30 @@ session on the same machine.
 
 ## Unreleased — 2026-10-24
 
+- Prefill: register-blocked WMMA GEMM core, default for codebook `mul1` at
+  4–6 bits and at least 128 rows (`STRIX_TRELLIS_WMMA_TILED=0` selects the
+  previous core; fewer rows, other codebooks and other bit rates keep it).
+  Same split count, split bounds and K16 accumulation order per output, so
+  the same bits; tiles of 128×256, 256×128 or 128×128 by row count, with
+  grouped block order. `STRIX_TRELLIS_WMMA_RASTER` changes the block order
+  for measurement only. Full operator, previous core / new default / new
+  core with the fused epilogue rotated three times in one session: output
+  hashes identical in all 114 cells (7 EAQ tensors and the per-rank shapes
+  at K4/K5, M 128–4096) and all runs; the default is faster in every cell,
+  median 2.04× (1.04–4.58×), 14–71 % of the measured 47.6 TOPS sustained
+  WMMA rate (median 48 %), against 12–38 % before. New benchmark
+  `strix_trellis_prefill_tiled_bench`.
+- Optional fused output epilogue for single-split calls of that core
+  (`STRIX_TRELLIS_WMMA_TILED_FUSED=1`, same bits), off by default: up to
+  30 % faster in most cells, but slower than the separate transform in
+  three small cells (shared down K4 M 128 by 6–13 %, `q_a` K4 M 128 by
+  2–4 %, `o_a` slice K4 M 256).
+- `api_linear_bench`: `STRIX_BENCH_PATH=api|plan|graph` and `STRIX_BENCH_ROWS`;
+  every clone and phase must give the same output bits.
+- README: measured `gfx1151` WMMA ceiling (burst 53.9 TOPS FP16, sustained
+  47.6–48.3 TOPS under the thermal limit) and prefill as a percentage of
+  it; distance to the ceilings by class; R8 direct-output decode rows
+  measured again; the EAQ `q_a` tensor is K6 (was labelled K5).
 - Direct-output R8 GEMV (`q_b`, `o_b`, shared down and output head):
   each K16 step decodes its four weight pairs first and issues the dot
   products of the two independent chains of every row alternately, with the

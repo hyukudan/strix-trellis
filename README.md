@@ -141,6 +141,8 @@ model. **CPU-tested**: implemented and covered by CPU contract tests only.
 | CPU reference (`python/strix_trellis`) | Reference | Exact decode for the `3inst`, `mcg` and `mul1` codebooks; integer rates 1–8 bits, plus 1.5 / 2.5 / 3.5 bits for `mul1`. Matches the EXL3 reference CUDA kernels bit for bit on 2,621,440 real weights and on all 65,536 states of each codebook. |
 | Loader | In use | safetensors, mmap per group: `trellis`, `suh`, `svh`, codebook marker, optional bias. Exports borrowed regions or a reusable buffer. Rejects external `out_scales` and older formats without an explicit scale contract. |
 | HIP runtime, dense GEMV R1–R8 and WMMA GEMM | **In use** | mix-B dense layers (shared expert, output head) of the DeepSeek V4.1 Flash engine. Operator qualification: campaign V16, see [Measured performance](#measured-performance). |
+| Register-blocked WMMA GEMM core (prefill, `mul1` K4–K6, ≥ 128 rows; default since this revision) | **Measured on GPU** | Bitwise equal to the previous WMMA core on GPU (qualification grid with partial tiles, odd and empty splits, alpha/beta with ±0, subnormal, infinite and NaN outputs; 7 EAQ tensors and the per-rank shapes at M = 128–4096). Not yet used in a full model: the engine runs the previous core (`STRIX_TRELLIS_WMMA_TILED=0` selects it). See [Prefill](#prefill-wmma-gemm). |
+| Dual-issue order in the direct-output R8 GEMV (`STRIX_TRELLIS_DIRECT_DUAL_ISSUE`) | **Measured on GPU** | Outputs bit-identical to the previous order in all 50 fixture/row cells; see [Decode](#decode-gemv). The engine runs the previous order. |
 | Region upload (`strix_weights_prepare_parts`) | **In use** | Weight upload path of the engine loaders. |
 | Prepared plans (`strix_linear_plan_*`) | CPU-tested | Implemented in 0.2; no separate GPU qualification yet. |
 | Dense TP rank API (`strix_tp_dense_*`), dense R1 TP plans and grouped GEMV (`strix_tp_dense_plan_create_r1`, `strix_tp_dense_pair_plan_create_r1`, `strix_grouped_gemv_plan_*`) | **In use** (build option `STRIX_TRELLIS_ENABLE_EXPERIMENTAL_TP`) | Every attention projection (`q_a`‖`kv`, `q_b`, grouped `o_a`, `o_b`) of the DeepSeek V4.1 Flash engine runs through these plans. 40-layer bit-identical gate and A/B on hardware, 2026-10-24: greedy decode 34.7 → 30.6 ms/token, 6-token verify window 63.3 → 58.9 ms, 8 streams 85.4 → 83.6 ms/step. Exact-order split-K with S4 or LEGACY identities; grouped plans match `strix_gemv` R1 bits per row. See [DENSE_R1.md](docs/DENSE_R1.md). |
@@ -156,17 +158,26 @@ model. **CPU-tested**: implemented and covered by CPU contract tests only.
 
 ## Measured performance
 
-All tables in this section were measured on **2026-10-24** on this revision
-(0.3.0, commit `892b26e`). Where a row existed in the previous README, the
-V16 qualification build (2026-10-21) was measured again in the same session,
-alternating with this revision, and the previously published value is shown
-for comparison.
+All tables in this section were measured on **2026-10-24**, the prefill
+tables on **2026-10-25**. Where a row
+existed in an earlier README, the V16 qualification build (2026-10-21) was
+measured again in the same session, alternating with the measured revision,
+and the previously published value is shown for comparison.
+
+- Decode rows whose kernels changed after commit `892b26e` (the R8 rows of
+  `q_b`, `o_b`, shared down and the output head) were measured again on the
+  kernels of this revision, alternating with V16 and with the previous
+  revision. All other decode, plan and K2 rows were measured on `892b26e`;
+  their kernels have not changed since, so those numbers are kept.
+- Prefill rows were measured on this revision, with the previous WMMA core
+  (`STRIX_TRELLIS_WMMA_TILED=0`), the new default and the new core with the
+  fused epilogue alternating in the same session, one process per run.
 
 **Hardware and software:** AMD Ryzen AI Max+ 395, Radeon 8060S GPU
 (`gfx1151`, 40 CU, wave32), 128 GB unified memory (AMD lists 256 GB/s
 peak bandwidth), ROCm 10.1, Linux.
 
-**Method (same as V16):** one fixture per process, three repetitions with
+**Method for the decode, plan and head tables (same as V16):** one fixture per process, three repetitions with
 alternating build order; each repetition reports the median of 11 sweeps of
 HIP events, and the table shows the median of the three. Packed weights
 rotate over disjoint copies of at least 256 MiB (640 MB for the plan tables)
@@ -195,53 +206,204 @@ after 512 MB of unrelated reads, takes t ≈ 6.0 µs + S / 248 GB/s for S from
 call is to a launch that does nothing but read its weights once. It is shown
 for weights up to 64 MB.
 
+**WMMA compute ceiling:** a standalone HIP kernel (not part of this
+repository) that issues only independent `v_wmma` 16×16×16 instructions
+from registers, swept over chains per wave, waves per SIMD and grid size,
+was run on the same machine. Best burst rates with a cool GPU: FP16 → FP32
+**53.9 TOPS** (90.8 % of the 59.4 TOPS that 40 CU × 512 FLOP/clock give at
+2.9 GHz), BF16 → FP32 53.7, INT8 → INT32 54.7, INT4 → INT32 107.4. Run for
+60 s, the same kernel holds 49.9 TOPS for about 10 s and then settles at
+**47.6–48.3 TOPS** as the GPU reaches its thermal limit (98 °C, 2.53–2.58
+GHz); per clock the rate is the same as in the burst. Prefill is reported
+as *% of sustained WMMA* = useful TOPS / 47.6. Two more results from the
+same kernel bound what a trellis GEMM can reach: VALU instructions do not
+overlap with WMMA on this GPU (4 FP32 FMAs per WMMA cost 12 %, 16 cost
+39 %), so every decode instruction in the inner loop costs WMMA issue time;
+and feeding both operands from LDS reaches 46.0–46.6 TOPS.
+
 Weights marked "EAQ" are real layer-0 tensors and the output head of a public
 DeepSeek V4.1 Flash EXL3 checkpoint (EAQ v1). "Synthetic" rows use DeepSeek
 V4.1 Flash shapes with synthetic weights and activations.
+
+### Distance to the ceilings
+
+The goal is 100 % of the measured ceiling for every class. Where this
+revision stands (details and causes in the sections below):
+
+| Class | Ceiling | Reached |
+|---|---|---|
+| Decode, large single-row reads (`q_b`, `o_b`, output head, R1) | read, 246.7 GB/s | 81–89 % |
+| Decode, R8 direct-output (`q_b`, `o_b`, shared down, head) | read | 65–84 % |
+| Decode, small R1 sites through `strix_gemv` (`q_a`, `o_a` slice) | read / call floor | 47–58 % / 74–75 % |
+| Decode, dense R1 TP plans, R1 | read / call floor | 43–89 % / 79–93 % |
+| Decode, dense R1 TP plans and grouped `o_a`, R8 | read | 30–75 % |
+| K2 expert block, cold, partly shared or disjoint routes | read | 71–83 % |
+| Prefill, M ≥ 512 | sustained WMMA, 47.6 TOPS | 32–70 % (median 48 %) |
+| Prefill, M 128–256 | sustained WMMA | 14–71 % |
 
 ### Decode (GEMV)
 
 | Tensor | K (bits) | Rows | Previous README (V16) µs | V16 build, same session µs | This revision µs | GB/s | % of read ceiling | % of call floor |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
 | EAQ `q_b` | 5 | 1 | 130.752 | 130.723 | 130.720 | 200.5 | 81.3 % | 85.3 % |
-| EAQ `q_b` | 5 | 8 | 150.422 | 151.364 | 154.506 | 169.7 | 68.8 % | 72.2 % |
+| EAQ `q_b` | 5 | 8 | 150.422 | 150.052 | 151.579 | 172.9 | 70.1 % | 73.6 % |
 | EAQ `o_b` | 5 | 1 | 124.304 | 124.617 | 124.705 | 210.2 | 85.2 % | 89.5 % |
-| EAQ `o_b` | 5 | 8 | 146.171 | 145.270 | 146.259 | 179.2 | 72.7 % | 76.3 % |
+| EAQ `o_b` | 5 | 8 | 146.171 | 144.484 | 143.906 | 182.2 | 73.8 % | 77.5 % |
 | EAQ shared w1 | 5 | 8 | 52.137 | 51.685 | 51.833 | 142.2 | 57.7 % | 68.9 % |
 | EAQ shared w2 | 5 | 1 | 39.138 | 39.090 | 39.036 | 188.9 | 76.6 % | 91.5 % |
-| EAQ shared w2 | 5 | 8 | 46.660 | 46.665 | 46.811 | 157.5 | 63.8 % | 76.3 % |
-| EAQ `q_a` | 5 | 1 | — | 34.391 | 34.411 | 142.8 | 57.9 % | 75.0 % |
-| EAQ `q_a` | 5 | 8 | — | 38.414 | 38.046 | 129.2 | 52.4 % | 67.9 % |
+| EAQ shared w2 | 5 | 8 | 46.660 | 46.610 | 46.223 | 159.5 | 64.7 % | 77.3 % |
+| EAQ `q_a` | 6 | 1 | — | 34.391 | 34.411 | 142.8 | 57.9 % | 75.0 % |
+| EAQ `q_a` | 6 | 8 | — | 38.414 | 38.046 | 129.2 | 52.4 % | 67.9 % |
 | EAQ `o_a`, one slice | 5 | 1 | — | 22.495 | 22.490 | 116.6 | 47.2 % | 73.7 % |
 | EAQ output head | 6 | 1 | 2258.708 | 2262.116 | 2262.357 | 219.4 | 88.9 % | — |
-| EAQ output head | 6 | 8 | 2389.518 | 2392.366 | 2398.606 | 207.0 | 83.9 % | — |
+| EAQ output head | 6 | 8 | 2389.518 | 2392.206 | 2398.567 | 207.0 | 83.9 % | — |
 | Synthetic `o_b` | 2 | 2 | 65.011 | 65.182 | 65.710 | 159.6 | 64.7 % | 73.4 % |
 | Synthetic `o_b` | 2 | 8 | 91.766 | 90.963 | 92.379 | 113.5 | 46.0 % | 52.2 % |
 | Synthetic `q_b` | 2 | 2 | 68.627 | 69.048 | 69.181 | 151.6 | 61.4 % | 69.7 % |
 | Synthetic `q_b` | 2 | 8 | 99.923 | 100.295 | 101.241 | 103.6 | 42.0 % | 47.7 % |
 
-- The generic GEMV kernels are the V16 kernels. This revision is within
-  ±1.6 % of the V16 build in the same session on every row except EAQ `q_b`
-  R8, which is 2.1 % slower (154.5 µs against 151.4 µs, the same in all
-  three repetitions).
+- The R8 rows of `q_b`, `o_b`, shared down and the output head use the
+  direct-output kernels, which issue their dot products in dual-issue order
+  in this revision (`STRIX_TRELLIS_DIRECT_DUAL_ISSUE`, same bits). Against
+  the previous revision in the same session: `q_b` R8 152.40 → 151.58 µs
+  (−0.5 %), shared down R8 46.47 → 46.22 µs, `o_b` R8 144.23 → 143.91 µs,
+  head R8 unchanged (2399.5 → 2398.6 µs). `q_b` R8 is still 1.0 % slower
+  than the V16 build (150.05 µs); the remaining difference is inside the
+  kernel (instruction scheduling), not in launches or gaps.
+- All other rows were measured on `892b26e`, within ±1.6 % of the V16
+  build in that session.
 - The large single-row reads reach 81–89 % of the read ceiling and 85–90 %
   of the call floor. Small tensors (`q_a`, `o_a`) are limited by the fixed
   per-launch cost rather than by bandwidth.
 
 ### Prefill (WMMA GEMM)
 
-| EAQ tensor | M | Previous README (V16) µs | V16 build, same session µs | This revision µs | Useful TOPS |
-|---|---:|---:|---:|---:|---:|
-| `q_b` | 256 | 1820.727 | 1833.235 | 1811.863 | 11.85 |
-| `o_b` | 256 | 1481.859 | 1465.656 | 1436.243 | 14.95 |
-| shared w1 | 128 | 246.790 | 240.717 | 243.143 | 12.42 |
-| shared w2 | 256 | 415.835 | 412.373 | 410.307 | 14.72 |
-| `q_a` | 256 | 263.889 | 257.699 | 257.312 | 13.04 |
-| `o_a`, one slice | 256 | 212.899 | 208.064 | 208.044 | 10.32 |
+This revision makes a register-blocked WMMA core the default for codebook
+`mul1` at 4–6 bits and at least 128 rows (`STRIX_TRELLIS_WMMA_TILED=0`
+selects the previous core). It keeps the split count, the split bounds and
+the ascending K16 accumulation order of every output, so its outputs are
+bit-identical to the previous core; only the block tiling, the LDS layout
+and the block order change. Tile per row count: 128 rows → 128×256 (128×128
+for `N` ≥ 16,384 or not a multiple of 256), 129–1024 rows → 256×128,
+more → 128×128; the 256×128 and 128×128 tiles visit the blocks in groups
+of two row blocks per column so that activation rows are reused while hot.
+With one split the core can also apply the output transform in its
+epilogue (`STRIX_TRELLIS_WMMA_TILED_FUSED=1`, same bits); this is off by
+default, see below.
 
-Prefill is not limited by weight reads: at M = 256 the weights stream at 10–
-15 % of the read ceiling. No compute ceiling was measured for this README, so
-no percentage of peak is claimed for prefill.
+**Method:** full operator (input H128 transform, WMMA core, output
+transform) through the internal entry point that `strix_gemm` uses, so
+without the C API argument validation. One process per run; the previous
+core (A), the default of this revision (B) and B with the fused epilogue
+(F) were run three times each in the same session, in the orders A F B,
+F B A, B A F. Each run reports the median of 11 calls; the tables show the
+median of the three runs. The weights stay in place between calls (earlier
+sweeps with weights rotated over ≥ 256 MiB gave the same core times within
+a few percent: prefill is compute-bound). Bitwise gate: the previous and
+the new core give the same output bits on a synthetic grid (partial tiles,
+odd and empty splits, alpha/beta with ±0, subnormal, infinite and NaN old
+outputs) and on every cell below; every cell's output hash is identical in
+all nine runs and in an earlier session of ten runs. *% of sustained WMMA* =
+useful TOPS / 47.6.
+
+| EAQ tensor | `(I, N)` | K | M | Previous core µs | This revision µs | Speed-up | Useful TOPS | % of sustained WMMA (previous → this) |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+| `q_b` (both ranks) | `(1280, 32768)` | 5 | 128 | 942.8 | 424.8 | 2.22× | 25.3 | 24 % → **53 %** |
+| `q_b` (both ranks) | `(1280, 32768)` | 5 | 256 | 1800.2 | 993.9 | 1.81× | 21.6 | 25 % → **45 %** |
+| `q_b` (both ranks) | `(1280, 32768)` | 5 | 512 | 3659.7 | 1940.0 | 1.89× | 22.1 | 25 % → **47 %** |
+| `q_b` (both ranks) | `(1280, 32768)` | 5 | 1024 | 7365.5 | 3807.1 | 1.93× | 22.6 | 25 % → **47 %** |
+| `q_b` (both ranks) | `(1280, 32768)` | 5 | 2048 | 14851.8 | 7441.3 | 2.00× | 23.1 | 24 % → **49 %** |
+| `q_b` (both ranks) | `(1280, 32768)` | 5 | 4096 | 29251.6 | 15232.7 | 1.92× | 22.6 | 25 % → **47 %** |
+| `o_b` (both ranks) | `(8192, 5120)` | 5 | 128 | 717.4 | 350.6 | 2.05× | 30.6 | 31 % → **64 %** |
+| `o_b` (both ranks) | `(8192, 5120)` | 5 | 256 | 1329.3 | 634.7 | 2.09× | 33.8 | 34 % → **71 %** |
+| `o_b` (both ranks) | `(8192, 5120)` | 5 | 512 | 3091.1 | 1321.5 | 2.34× | 32.5 | 29 % → **68 %** |
+| `o_b` (both ranks) | `(8192, 5120)` | 5 | 1024 | 6308.3 | 3067.8 | 2.06× | 28.0 | 29 % → **59 %** |
+| `o_b` (both ranks) | `(8192, 5120)` | 5 | 2048 | 12815.6 | 6161.2 | 2.08× | 27.9 | 28 % → **59 %** |
+| `o_b` (both ranks) | `(8192, 5120)` | 5 | 4096 | 24817.4 | 11994.8 | 2.07× | 28.6 | 29 % → **60 %** |
+| shared w1 | `(5120, 2304)` | 5 | 128 | 191.2 | 130.1 | 1.47× | 23.2 | 33 % → **49 %** |
+| shared w1 | `(5120, 2304)` | 5 | 256 | 429.1 | 207.8 | 2.07× | 29.1 | 30 % → **61 %** |
+| shared w1 | `(5120, 2304)` | 5 | 512 | 851.4 | 408.2 | 2.09× | 29.6 | 30 % → **62 %** |
+| shared w1 | `(5120, 2304)` | 5 | 1024 | 1874.7 | 934.0 | 2.01× | 25.9 | 27 % → **54 %** |
+| shared w1 | `(5120, 2304)` | 5 | 2048 | 3894.1 | 1885.2 | 2.07× | 25.6 | 26 % → **54 %** |
+| shared w1 | `(5120, 2304)` | 5 | 4096 | 7769.7 | 3834.2 | 2.03× | 25.2 | 26 % → **53 %** |
+| shared w3 | `(5120, 2304)` | 5 | 128 | 187.8 | 128.2 | 1.47× | 23.6 | 34 % → **49 %** |
+| shared w3 | `(5120, 2304)` | 5 | 256 | 437.2 | 211.7 | 2.07× | 28.5 | 29 % → **60 %** |
+| shared w3 | `(5120, 2304)` | 5 | 512 | 879.4 | 395.3 | 2.22× | 30.6 | 29 % → **64 %** |
+| shared w3 | `(5120, 2304)` | 5 | 1024 | 1898.8 | 918.6 | 2.07× | 26.3 | 27 % → **55 %** |
+| shared w3 | `(5120, 2304)` | 5 | 2048 | 3946.7 | 1903.6 | 2.07× | 25.4 | 26 % → **53 %** |
+| shared w3 | `(5120, 2304)` | 5 | 4096 | 7858.2 | 3896.3 | 2.02× | 24.8 | 26 % → **52 %** |
+| shared w2 | `(2304, 5120)` | 5 | 128 | 178.5 | 121.2 | 1.47× | 24.9 | 36 % → **52 %** |
+| shared w2 | `(2304, 5120)` | 5 | 256 | 330.9 | 195.6 | 1.69× | 30.9 | 38 % → **65 %** |
+| shared w2 | `(2304, 5120)` | 5 | 512 | 830.6 | 393.4 | 2.11× | 30.7 | 31 % → **65 %** |
+| shared w2 | `(2304, 5120)` | 5 | 1024 | 1818.6 | 951.0 | 1.91× | 25.4 | 28 % → **53 %** |
+| shared w2 | `(2304, 5120)` | 5 | 2048 | 3752.8 | 1928.7 | 1.95× | 25.1 | 27 % → **53 %** |
+| shared w2 | `(2304, 5120)` | 5 | 4096 | 7632.9 | 3841.4 | 1.99× | 25.2 | 27 % → **53 %** |
+| `q_a` | `(5120, 1280)` | 6 | 128 | 129.2 | 90.4 | 1.43× | 18.6 | 27 % → **39 %** |
+| `q_a` | `(5120, 1280)` | 6 | 256 | 211.3 | 129.2 | 1.63× | 26.0 | 33 % → **55 %** |
+| `q_a` | `(5120, 1280)` | 6 | 512 | 557.1 | 229.9 | 2.42× | 29.2 | 25 % → **61 %** |
+| `q_a` | `(5120, 1280)` | 6 | 1024 | 1256.5 | 508.3 | 2.47× | 26.4 | 22 % → **55 %** |
+| `q_a` | `(5120, 1280)` | 6 | 2048 | 2586.9 | 1263.3 | 2.05× | 21.2 | 22 % → **45 %** |
+| `q_a` | `(5120, 1280)` | 6 | 4096 | 4874.7 | 2431.8 | 2.00× | 22.1 | 23 % → **46 %** |
+| `o_a`, one slice | `(4096, 1024)` | 5 | 128 | 108.3 | 67.3 | 1.61× | 15.9 | 21 % → **34 %** |
+| `o_a`, one slice | `(4096, 1024)` | 5 | 256 | 188.5 | 109.7 | 1.72× | 19.6 | 24 % → **41 %** |
+| `o_a`, one slice | `(4096, 1024)` | 5 | 512 | 415.0 | 187.6 | 2.21× | 22.9 | 22 % → **48 %** |
+| `o_a`, one slice | `(4096, 1024)` | 5 | 1024 | 783.8 | 393.7 | 1.99× | 21.8 | 23 % → **46 %** |
+| `o_a`, one slice | `(4096, 1024)` | 5 | 2048 | 2034.7 | 969.0 | 2.10× | 17.7 | 18 % → **37 %** |
+| `o_a`, one slice | `(4096, 1024)` | 5 | 4096 | 4026.3 | 2255.0 | 1.79× | 15.2 | 18 % → **32 %** |
+
+Per-rank DeepSeek V4.1 Flash shapes (synthetic weights, K4 and K5), % of
+sustained WMMA, previous core → this revision:
+
+| Site | `(I, N)` | K | M 128 | M 256 | M 512 | M 1024 | M 2048 | M 4096 |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+| `q_b` | `(1280, 16384)` | 4 | 16 → **49** | 24 → **50** | 24 → **43** | 25 → **45** | 25 → **48** | 25 → **48** |
+| `q_b` | `(1280, 16384)` | 5 | 12 → **49** | 25 → **47** | 24 → **44** | 25 → **45** | 26 → **48** | 26 → **48** |
+| `o_b` | `(4096, 5120)` | 4 | 18 → **56** | 34 → **71** | 31 → **70** | 28 → **60** | 27 → **53** | 27 → **54** |
+| `o_b` | `(4096, 5120)` | 5 | 13 → **55** | 33 → **69** | 30 → **68** | 28 → **58** | 27 → **53** | 28 → **53** |
+| shared gate / up | `(5120, 1152)` | 4 | 16 → **38** | 17 → **27** | 16 → **51** | 16 → **52** | 15 → **42** | 15 → **45** |
+| shared gate / up | `(5120, 1152)` | 5 | 12 → **38** | 13 → **28** | 12 → **52** | 12 → **51** | 12 → **41** | 12 → **45** |
+| shared down | `(1152, 5120)` | 4 | 17 → **44** | 31 → **57** | 31 → **59** | 26 → **46** | 24 → **42** | 24 → **43** |
+| shared down | `(1152, 5120)` | 5 | 12 → **44** | 31 → **55** | 30 → **59** | 26 → **46** | 24 → **42** | 24 → **43** |
+| `q_a` | `(5120, 1280)` | 4 | 14 → **15** | 18 → **31** | 17 → **57** | 16 → **56** | 15 → **46** | 15 → **48** |
+| `q_a` | `(5120, 1280)` | 5 | 12 → **14** | 13 → **30** | 12 → **54** | 12 → **55** | 12 → **45** | 12 → **47** |
+| `o_a`, one slice | `(4096, 1024)` | 4 | 16 → **20** | 17 → **24** | 16 → **45** | 15 → **47** | 15 → **37** | 15 → **33** |
+| `o_a`, one slice | `(4096, 1024)` | 5 | 21 → **34** | 24 → **41** | 22 → **50** | 23 → **45** | 17 → **36** | 18 → **33** |
+
+- The default is faster than the previous core in all 114 cells: median
+  2.04×, from 1.04× (`q_a` K4, M 128) to 4.58×. It reaches a median of 48 %
+  of the sustained WMMA rate and at most 71 % (EAQ `o_b`, M 256); the
+  previous core reached 12–38 %.
+- The fused epilogue (F) takes up to 30 % less time than the separate
+  transform in most single-split cells, for example the EAQ `q_b` at every
+  M (45–53 % → 61–64 % of sustained) and shared down at M ≥ 1024. It is off
+  by default because it was slower in three cells in all three paired runs
+  (more than 0.5 % in the median): shared down K4 at M 128 (6–13 %), `q_a`
+  K4 at M 128 (2–4 %) and the `o_a` slice K4 at M 256. A likely cause, not
+  yet verified, is that these grids have few blocks, so the transform
+  inside the core runs on fewer CUs than the separate transform does. Once
+  those cells are fixed, the fused epilogue becomes the default.
+- Rows below 128 keep the previous core. Other codebooks and bit rates keep
+  it at every row count.
+
+**Distance to the ceiling.** At M ≥ 512 the default reaches a median of
+48 % of the sustained rate (32–70 % by tensor and M; `q_b` 43–49 %, `o_b`
+53–70 %); with the fused epilogue the `q_b` cells at M ≥ 512 reach
+58–64 %. Controlled variants of the core on the EAQ `q_b` at M 4096 (core
+only, earlier session, with an exploratory 128×256 tile; the shipped policy uses 128×128
+at this size) give an indication of where the rest goes: full core 11.77
+ms, without the trellis decode 9.96 ms, WMMA and fragment loads only 8.23
+ms (88 % of the sustained rate). The decode costs time because VALU
+instructions do not overlap WMMA on this GPU. We attribute most of the
+remaining difference to activation staging through LDS and its barriers;
+this is a hypothesis, because the fragment-only variant removes several
+operations at once. The separate output transform adds further time on
+shapes with a wide output. Small shapes are further away: at M 128–256,
+the per-rank `q_a`, `o_a` and shared gate / up shapes give the 40 CU only
+4–10 output tiles per K split (14–41 %; the EAQ gate / up tensors, `N` =
+2,304 with up to 18 tiles, reach 49–61 % there), and the split count is part
+of the numerical contract (more splits change the summation order and the
+bits). Prefill streams the weights at a small fraction of the read ceiling,
+so it is compute-bound, not bandwidth-bound.
 
 ### Dense R1 TP plans (decode, one rank)
 
@@ -359,6 +521,14 @@ read (gate/up and down of the experts selected by any row).
 - 2026-10-24: every dense API run (24 per build) and head run (3 per build)
   above passed its reference checks on both builds; every plan cell matched
   `strix_gemv` bit for bit; K2 QA 24/24 on both fixture sets.
+- Prefill core (this revision): decoder identity on all 65,536 states, the
+  synthetic bitwise grid and all 114 timed cells give the same output bits
+  with the previous and the new core, in every run.
+- Build of this revision, on the GPU: every prefill cell above has the same
+  output hash as the build without the dual-issue change, and the decode
+  API outputs of `q_b`, `o_b` and shared down (rows 1–256, checked against
+  the CPU reference) and of the output head (R1–R8) are bit-identical to
+  those of the build used for the decode table.
 - WMMA results are not bit-identical to scalar sums; the declared tolerances
   apply.
 
@@ -384,6 +554,17 @@ The plan tables come from `strix_trellis_dense_r1_group_probe` (built with
 export PROBE_ROTATE_MB=640 PROBE_SWEEPS=11 PROBE_POLICY_ONLY=1
 build-hip/strix_trellis_dense_r1_group_probe tune1 1280 16384 4 1 2 6 8   # dense R1 plan, q_b shape
 build-hip/strix_trellis_dense_r1_group_probe tune 4 1 2 6 8               # grouped o_a
+```
+
+The prefill tables come from `strix_trellis_prefill_tiled_bench`: `check`
+runs the bitwise gate; `linear-synth` times the full operator at the given
+row counts for the per-rank shapes and for the fixtures after `--`. Run it
+with `STRIX_TRELLIS_WMMA_TILED=0` for the previous core:
+
+```sh
+build-hip/strix_trellis_prefill_tiled_bench check
+build-hip/strix_trellis_prefill_tiled_bench linear-synth 128 256 512 1024 2048 4096 -- \
+  "$FIXTURES/gpu-dense/layers.0.attn.wq_b.stgpu"
 ```
 
 Record the commit, compiler version, binary and fixture hashes, clocks and
@@ -443,6 +624,7 @@ header-only interface target. GPU programs are not registered with CTest.
 | `STRIX_TRELLIS_BUILD_BENCHMARKS` | OFF | Build HIP benchmark programs. |
 | `STRIX_TRELLIS_BUILD_EXPERIMENTAL_K2_LOCAL` | OFF | Build the K2 local-reduction candidate and its probe. |
 | `STRIX_TRELLIS_ENABLE_EXPERIMENTAL_TP` | OFF | Build the TP dense / MoE rank APIs and their probe. |
+| `STRIX_TRELLIS_DIRECT_DUAL_ISSUE` | ON | Direct-output R8 GEMV: dot products ordered for dual issue (same bits). OFF keeps the previous order. |
 
 More detail: [BUILD.md](docs/BUILD.md), [GPU_TESTS.md](docs/GPU_TESTS.md).
 
@@ -496,8 +678,9 @@ and streams.
   configurations with up to 32 groups. A fast public grouped path and its
   performance are pending. Quality results above use 2-bit GGUF
   experts, not EXL3 experts.
-- R8, small-matrix and K2 paths reach 104–179 GB/s in the decode table
-  (42–73 % of the read ceiling), against 189–219 GB/s (77–89 %) for the best
+- Apart from the output head (207 GB/s, 83.9 % at R8), R8, small-matrix and
+  K2 paths reach 104–182 GB/s in the decode table (42–74 % of the read
+  ceiling), against 189–219 GB/s (77–89 %) for the best
   R1 paths.
 - The quality numbers come from an emulation harness that is not included
   here, not from these kernels end to end.

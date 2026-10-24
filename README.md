@@ -22,6 +22,45 @@ The decode, GEMV, GEMM and transform kernels are written from scratch. See
 > 0.3.0. The [status table](#status) gives the level and the evidence for each
 > component.
 
+## At a glance
+
+**Strix Trellis is a low-level kernel library, not a standalone LLM server.** It loads and executes trellis-quantized EXL3/QTIP tensors on AMD Strix Halo. Use it if you are integrating compressed linear layers into an inference engine or reproducing its numerical and performance measurements.
+
+| Question | Answer |
+|---|---|
+| What runs today? | Dense GEMV/GEMM kernels used in DeepSeek V4.1 Flash, with end-to-end verification in the [Strix Halo engine](https://github.com/hyukudan/strix-halo-engine-lab). |
+| What remains experimental? | K2 routed-expert operators and some APIs are operator-qualified or CPU-tested only. Check [Status](#status) before using a path. |
+| Hardware and software | AMD Strix Halo (`gfx1151`) with a supported ROCm/HIP toolchain for GPU execution; Python 3.10+ and NumPy for the CPU reference. |
+| Start without a GPU | [Quick start (CPU)](#quick-start-cpu) and `bash tools/ci_cpu.sh`. |
+| Compile GPU kernels | [Build with HIP](#build-with-hip); enable experimental options only when needed. |
+| Integrate into an engine | [C ABI](#api-overview), [API contract](docs/API.md), [build guide](docs/BUILD.md) and [GPU tests](docs/GPU_TESTS.md). |
+| Reproduce benchmarks | [Measurements and commands](#measured-performance), [GPU test protocol](docs/GPU_TESTS.md). |
+
+## Install and try it
+
+Clone the repository and run its **CPU reference** first. The CPU tests do not require a Strix Halo GPU or model weights:
+
+```sh
+git clone https://github.com/hyukudan/strix-trellis.git
+cd strix-trellis
+python -m pip install -e ./python
+bash tools/ci_cpu.sh
+```
+
+For **native GPU use** on a supported Strix Halo Linux machine, configure and build the HIP runtime:
+
+```sh
+ROCM=/opt/rocm   # change to match your installation
+cmake -S . -B build-hip -DCMAKE_BUILD_TYPE=Release \
+  -DSTRIX_TRELLIS_ENABLE_HIP=ON \
+  -DCMAKE_HIP_COMPILER="$ROCM/lib/llvm/bin/clang++" \
+  -DCMAKE_HIP_COMPILER_ROCM_ROOT="$ROCM" \
+  -DCMAKE_PREFIX_PATH="$ROCM" -DCMAKE_HIP_ARCHITECTURES=gfx1151
+cmake --build build-hip --parallel
+```
+
+This produces the `strix_trellis` static runtime and GPU test harness; it does **not** download model weights or start an inference endpoint. To load a real EXL3 safetensors layer with the Python reference, follow [the example](#quick-start-cpu). For C/C++ integration, consult [API.md](docs/API.md). For full-model serving, see [Strix Halo Engine Lab](https://github.com/hyukudan/strix-halo-engine-lab); for routing/placement, [TensorMeld](https://github.com/hyukudan/tensormeld); for cluster deployment/control, [Hyperloom](https://github.com/hyukudan/hyperloom).
+
 ## Target model
 
 The library is developed and tested against **DeepSeek V4.1 Flash**. The

@@ -363,8 +363,9 @@ bool wmma_tiled_enabled() {
 }
 bool wmma_tiled_fused_output_enabled() {
     static const bool enabled = [] {
+        // Off by default: slower than the separate transform in some measured cells.
         const char* v = std::getenv("STRIX_TRELLIS_WMMA_TILED_FUSED");
-        return !(v && std::strcmp(v, "0") == 0);
+        return v && std::strcmp(v, "1") == 0;
     }();
     return enabled;
 }

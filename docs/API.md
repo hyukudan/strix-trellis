@@ -61,14 +61,16 @@ inspection, launch or synchronization, and required workspace is zero.
 for codebook `mul1` (2) at 4-6 bits and at least 128 rows. It gives the same
 bits as the previous core: the split count, the split bounds and the ascending
 K16 accumulation order per output are unchanged; only the block tiling, the
-LDS layout and the block order differ. With one split it also applies the
+LDS layout and the block order differ. With one split it can also apply the
 output transform (H128, `svh`, bias, alpha/beta) in its epilogue, with the
-same arithmetic as the separate transform. Process-wide flags, read once:
+same arithmetic and bits as the separate transform; this is off by default
+because it was slower than the separate transform in some measured shapes.
+Process-wide flags, read once:
 
 | Variable | Effect |
 |---|---|
 | `STRIX_TRELLIS_WMMA_TILED=0` | use the previous WMMA core everywhere |
-| `STRIX_TRELLIS_WMMA_TILED_FUSED=0` | keep the separate output transform |
+| `STRIX_TRELLIS_WMMA_TILED_FUSED=1` | apply the output transform in the core's epilogue (one split only) |
 | `STRIX_TRELLIS_WMMA_RASTER=<1..64>` | block-order group size (measurement only; bits unchanged) |
 
 ## Modern EXL3 host transport

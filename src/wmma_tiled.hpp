@@ -17,5 +17,5 @@ hipError_t launch_wmma_tiled(const DeviceWeights& weights, const _Float16* input
 // True when launch_wmma_tiled would accept this call with a fused epilogue.
 bool wmma_tiled_fuses_output(const DeviceWeights& weights, int rows, int splits, int tile = -1);
 bool wmma_tiled_enabled();             // STRIX_TRELLIS_WMMA_TILED=0 disables
-bool wmma_tiled_fused_output_enabled(); // STRIX_TRELLIS_WMMA_TILED_FUSED=0 disables
+bool wmma_tiled_fused_output_enabled(); // STRIX_TRELLIS_WMMA_TILED_FUSED=1 enables
 }

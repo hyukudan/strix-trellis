@@ -8,6 +8,10 @@ session on the same machine.
 
 ## Unreleased — 2026-10-24
 
+- Direct-output R8 GEMV kernels advance the weight tile pointer per K16 row
+  instead of recomputing it; 11–12 fewer instructions per inner iteration with
+  the current compiler, bit-identical outputs. Benchmarks print `output_fnv`,
+  a hash of the output bits.
 - `strix_weights_device_span` (`STRIX_TRELLIS_HAS_WEIGHTS_SPAN`): read-only
   base and size of the prepared weights' device allocation, for callers that
   read the bytes ahead of use. The library does not depend on it. Contract

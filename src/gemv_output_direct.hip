@@ -34,9 +34,12 @@ __global__ __launch_bounds__(1024) void g4(const uint32_t* __restrict__ packed,
             }
         }
         __syncthreads();
-        for(int kk=0;kk<8 && base+kk<end;++kk) {
-            packed_decode::SaddrLane<Bits> reader(packed+
-                (size_t(base+kk)*(output/16)+tile)*Bits*8);
+        // Same tile addresses as (base+kk)*(output/16)+tile, advanced by one
+        // K16 row per step so the compiler does not recompute the product.
+        const size_t row_words=size_t(output/16)*Bits*8;
+        const uint32_t* row=packed+(size_t(base)*(output/16)+tile)*Bits*8;
+        for(int kk=0;kk<8 && base+kk<end;++kk,row+=row_words) {
+            packed_decode::SaddrLane<Bits> reader(row);
             Pair av[8][2];
             #pragma unroll
             for(int r=0;r<8;++r) {

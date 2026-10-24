@@ -55,6 +55,22 @@ stream and workspace's declared address/alignment/alias constraints still apply.
 Tensor pointers may be NULL with buffer_bytes=0. There is no device buffer
 inspection, launch or synchronization, and required workspace is zero.
 
+### GEMM core selection and environment flags
+
+`strix_gemm` (and every GEMM-path call) uses the register-blocked WMMA core
+for codebook `mul1` (2) at 4-6 bits and at least 128 rows. It gives the same
+bits as the previous core: the split count, the split bounds and the ascending
+K16 accumulation order per output are unchanged; only the block tiling, the
+LDS layout and the block order differ. With one split it also applies the
+output transform (H128, `svh`, bias, alpha/beta) in its epilogue, with the
+same arithmetic as the separate transform. Process-wide flags, read once:
+
+| Variable | Effect |
+|---|---|
+| `STRIX_TRELLIS_WMMA_TILED=0` | use the previous WMMA core everywhere |
+| `STRIX_TRELLIS_WMMA_TILED_FUSED=0` | keep the separate output transform |
+| `STRIX_TRELLIS_WMMA_RASTER=<1..64>` | block-order group size (measurement only; bits unchanged) |
+
 ## Modern EXL3 host transport
 
 `strix_exl3_transport_desc` points to a contiguous host blob and a host-native

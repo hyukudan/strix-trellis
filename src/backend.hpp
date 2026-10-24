@@ -22,6 +22,8 @@ hipError_t query_fused_output_resources(int expected_device,
 // transfers or synchronization. Caller-owned 256-byte-aligned workspace.
 // Integer bits 1..8 initially. bias is optional device FP32 [output].
 size_t linear_workspace_bytes(const DeviceWeights& weights, int rows);
+// K partitions of launch_linear; fixes the numerics of the partial sums.
+int linear_split_count(const DeviceWeights& weights, int rows);
 hipError_t launch_linear(const DeviceWeights& weights, const float* input,
     float* output, int rows, void* workspace, hipStream_t stream,
     float alpha, float beta, bool prefer_wmma);

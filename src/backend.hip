@@ -4,6 +4,7 @@
 #include "trellis_device.hpp"
 #include "transforms.hpp"
 #include "gemm.hpp"
+#include "wmma_tiled.hpp"
 #include "gemv.hpp"
 #include "gemv_lds.hpp"
 #include "gemv_fused.hpp"
@@ -18,7 +19,7 @@ namespace strix_trellis {
 static_assert(sizeof(size_t)==8,"The HIP backend requires a 64-bit host");
 // Split policy uses measured cold vector shapes and enough WMMA workgroups for
 // narrow outputs. It is shared by query and submission, with no mutable tuning.
-static int split_count(const DeviceWeights& weights,int rows) {
+int linear_split_count(const DeviceWeights& weights,int rows) {
     int requested;
     if(rows>8) {
         int tile_m=wmma_tile_rows(weights,rows);
@@ -49,7 +50,7 @@ size_t linear_workspace_bytes(const DeviceWeights& w,int rows) {
     const size_t limit=std::numeric_limits<size_t>::max();
     size_t input_elements=size_t(rows)*size_t(w.input);
     size_t partial_elements=size_t(rows)*size_t(w.output);
-    int splits=split_count(w,rows);
+    int splits=linear_split_count(w,rows);
     if(input_elements>(limit-255)/2 || partial_elements>limit/4/size_t(splits)) return SIZE_MAX;
     // The transform dispatch processes four 128-value groups per block.
     if(input_elements/128>size_t(UINT32_MAX)*4 || partial_elements/128>size_t(UINT32_MAX)*4) return SIZE_MAX;
@@ -69,7 +70,7 @@ hipError_t launch_linear(const DeviceWeights& w,const float* input,float* output
         return launch_fused_both_trusted(w,input,output,rows,prefer_wmma,stream,alpha,beta);
     auto* transformed=reinterpret_cast<_Float16*>(workspace);
     auto* partial=reinterpret_cast<float*>(reinterpret_cast<char*>(workspace)+align256(size_t(rows)*w.input*2));
-    int splits=split_count(w,rows);
+    int splits=linear_split_count(w,rows);
     // Only measured dense mul1 geometries select the original-input R1 fusion.
     // Larger heads, other formats and GEMM retain the separately staged path.
     bool measured_fusion=(w.bits==6 && w.input==5120 && w.output==1280) ||
@@ -89,7 +90,18 @@ hipError_t launch_linear(const DeviceWeights& w,const float* input,float* output
                 transformed && !(reinterpret_cast<uintptr_t>(transformed)&3u)))
             return launch_fused_output_trusted(w,transformed,output,stream,alpha,beta);
         if(prefer_wmma) {
-            status=launch_wmma_core(w,transformed,partial,rows,splits,stream);
+            // Tiled core: same accumulation order per output, so the same bits.
+            // With one split it can also apply the output transform in its epilogue.
+            status=hipErrorNotSupported;
+            if(wmma_tiled_enabled()) {
+                if(wmma_tiled_fused_output_enabled() && wmma_tiled_fuses_output(w,rows,splits)) {
+                    WmmaFusedOutput fused_out{output,alpha,beta};
+                    status=launch_wmma_tiled(w,transformed,partial,rows,splits,stream,&fused_out);
+                    if(status!=hipErrorNotSupported) return status;
+                }
+                status=launch_wmma_tiled(w,transformed,partial,rows,splits,stream);
+            }
+            if(status==hipErrorNotSupported) status=launch_wmma_core(w,transformed,partial,rows,splits,stream);
             if(status!=hipSuccess)return status;
         } else {
             for(int begin=0;begin<rows;begin+=8) {

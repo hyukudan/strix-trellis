@@ -41,6 +41,9 @@ namespace fake {
 std::map<uintptr_t, size_t> buffers;
 int device = 0, wave = 32, allocs = 0, copies = 0, syncs = 0, launches = 0;
 int fail_copy = 0, fail_sync = 0, fail_launch = 0;
+size_t completion_counters = 0;        // what linear_completion_counters reports
+int completed_launches = 0, plain_memsets = 0;
+const void* last_counters = nullptr;
 int copy_failure_at = -1;
 int pointer_queries = 0, range_queries = 0, stream_queries = 0;
 std::vector<const void*> copy_sources;
@@ -98,6 +101,12 @@ hipError_t hipMalloc(void** p, size_t n) {
     fake::buffers[reinterpret_cast<uintptr_t>(*p)] = n; ++fake::allocs; return 0;
 }
 hipError_t hipFree(void* p) { fake::buffers.erase(reinterpret_cast<uintptr_t>(p)); std::free(p); return 0; }
+#ifndef STRIX_TRELLIS_ENABLE_EXPERIMENTAL_TP
+// The TP contract tests define their own counting memset.
+hipError_t hipMemsetAsync(void* p, int value, size_t count, hipStream_t) {
+    std::memset(p, value, count); ++fake::plain_memsets; return hipSuccess;
+}
+#endif
 hipError_t hipMemcpyAsync(void* d, const void* s, size_t n, int, hipStream_t) {
     ++fake::copies; fake::copy_sources.push_back(s);
     if (fake::fail_copy || fake::copies == fake::copy_failure_at) return 99;
@@ -133,6 +142,7 @@ hipError_t query_fused_both_resources(size_t shared,bool* supported) {
         });
 }
 size_t linear_workspace_bytes(const DeviceWeights&, int rows) { return size_t(rows) * 1024; }
+size_t linear_completion_counters(const DeviceWeights&, int, bool) { return fake::completion_counters; }
 hipError_t launch_linear(const DeviceWeights& weights, const float* input, float* output, int rows, void* workspace, hipStream_t stream,
                         float a, float b, bool w) {
     fake::last_input = input; fake::last_output = output; fake::last_rows = rows;
@@ -143,6 +153,12 @@ hipError_t launch_linear(const DeviceWeights& weights, const float* input, float
     else ++fake::fallback_routes;
     ++fake::launches; fake::alpha = a; fake::beta = b; fake::wmma = w;
     return fake::fail_launch ? 99 : 0;
+}
+hipError_t launch_linear_completed(const DeviceWeights& weights, const float* input, float* output, int rows, void* workspace,
+                                   uint32_t* counters, hipStream_t stream, float a, float b, bool w) {
+    fake::last_counters = counters;
+    if (counters) ++fake::completed_launches;
+    return launch_linear(weights, input, output, rows, workspace, stream, a, b, w);
 }
 }
 template<class T> T descriptor() {
@@ -481,6 +497,28 @@ int main() {
     assert(strix_linear_plan_destroy(gemm_plan) == STRIX_SUCCESS && w->plan_refs == 0);
     assert(strix_linear_plan_submit(nullptr) == STRIX_ERROR_INVALID_ARGUMENT);
     assert(strix_linear_plan_destroy(nullptr) == STRIX_ERROR_INVALID_ARGUMENT);
+    {
+        // One-launch completion: zeroed counters (complete before create returns) are passed on every submit and
+        // owned by the weights, so graphs captured from the plan may replay after the plan is destroyed.
+        stream.hip_stream = reinterpret_cast<void*>(1);
+        const int a0 = fake::allocs; const size_t b0 = fake::buffers.size();
+        fake::completion_counters = 3;
+        strix_linear_plan cp = nullptr;
+        const int s0 = fake::syncs;
+        assert(strix_linear_plan_create(c, &good, &stream, STRIX_OPERATION_GEMV, &cp) == STRIX_SUCCESS && cp);
+        assert(fake::allocs == a0 + 1 && fake::buffers.size() == b0 + 1 && fake::syncs == s0 + 1);
+        assert(strix_linear_plan_submit(cp) == STRIX_SUCCESS && fake::last_counters && fake::completed_launches == 1);
+        const uint32_t* z = static_cast<const uint32_t*>(fake::last_counters);
+        assert(z[0] == 0 && z[1] == 0 && z[2] == 0);
+        for (int i = 0; i < 3; ++i) assert(strix_linear_plan_submit(cp) == STRIX_SUCCESS && fake::last_counters == z);
+        assert(strix_linear_plan_destroy(cp) == STRIX_SUCCESS && fake::buffers.size() == b0 + 1);
+        fake::completion_counters = 0;
+        strix_linear_plan np = nullptr;
+        assert(strix_linear_plan_create(c, &good, &stream, STRIX_OPERATION_GEMV, &np) == STRIX_SUCCESS);
+        assert(fake::allocs == a0 + 1);
+        assert(strix_linear_plan_submit(np) == STRIX_SUCCESS && !fake::last_counters && fake::completed_launches == 4);
+        assert(strix_linear_plan_destroy(np) == STRIX_SUCCESS);
+    }
     d = good; stream.hip_stream = nullptr;
     assert(strix_linear_plan_create(c, &d, &stream, UINT32_MAX, &plan) == STRIX_ERROR_INVALID_ARGUMENT && !plan);
     d.output.data = d.input.data;

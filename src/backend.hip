@@ -59,6 +59,46 @@ size_t linear_workspace_bytes(const DeviceWeights& w,int rows) {
     return input_bytes+partial_bytes;
 }
 
+// Only measured dense mul1 geometries select the original-input R1 fusion.
+static bool measured_fusion(const DeviceWeights& w) {
+    return (w.bits==6 && w.input==5120 && w.output==1280) ||
+        (w.bits==5 && ((w.input==4096 && w.output==1024) ||
+          (w.input==8192 && w.output==5120) || (w.input==5120 && w.output==2304) ||
+          (w.input==2304 && w.output==5120)));
+}
+#ifdef STRIX_TRELLIS_PLAN_FUSED_COMPLETION
+static bool fused_input_r1(const DeviceWeights& w,int rows,bool prefer_wmma,const float* input,float* output) {
+    FusedBothLayout direct{};
+    if(fused_both_layout(w.input,w.output,w.bits,w.codebook,rows,prefer_wmma,
+            w.fused_both_capable,w.trellis,input,w.suh,w.svh,w.bias,output,direct)) return false;
+    return !prefer_wmma && rows==1 && w.codebook==2 && measured_fusion(w);
+}
+#endif
+size_t linear_completion_counters(const DeviceWeights& w,int rows,bool prefer_wmma) {
+#ifdef STRIX_TRELLIS_PLAN_FUSED_COMPLETION
+    // K5 N5120 shapes use the one-launch fused-both path when the device image allows it and are not
+    // qualified for completion otherwise, so they keep the two-launch fallback.
+    if(rows==1 && !prefer_wmma && w.codebook==2 && measured_fusion(w) && w.svh &&
+       !(w.bits==5 && w.output==5120)) return size_t(w.output/128)*32;  // one 128-byte line per counter
+#else
+    (void)w;(void)rows;(void)prefer_wmma;
+#endif
+    return 0;
+}
+hipError_t launch_linear_completed(const DeviceWeights& w,const float* input,float* output,int rows,
+    void* workspace,uint32_t* counters,hipStream_t stream,float alpha,float beta,bool prefer_wmma) {
+#ifdef STRIX_TRELLIS_PLAN_FUSED_COMPLETION
+    if(counters && fused_input_r1(w,rows,prefer_wmma,input,output)) {
+        size_t bytes=linear_workspace_bytes(w,rows);
+        if(bytes==SIZE_MAX || !workspace) return hipErrorInvalidValue;
+        auto* partial=reinterpret_cast<float*>(reinterpret_cast<char*>(workspace)+align256(size_t(rows)*w.input*2));
+        return launch_gemv_fused_complete(w,input,partial,output,counters,linear_split_count(w,rows),stream,alpha,beta);
+    }
+#else
+    (void)counters;
+#endif
+    return launch_linear(w,input,output,rows,workspace,stream,alpha,beta,prefer_wmma);
+}
 hipError_t launch_linear(const DeviceWeights& w,const float* input,float* output,int rows,
     void* workspace,hipStream_t stream,float alpha,float beta,bool prefer_wmma) {
     if(rows==0) return hipSuccess;
@@ -71,13 +111,8 @@ hipError_t launch_linear(const DeviceWeights& w,const float* input,float* output
     auto* transformed=reinterpret_cast<_Float16*>(workspace);
     auto* partial=reinterpret_cast<float*>(reinterpret_cast<char*>(workspace)+align256(size_t(rows)*w.input*2));
     int splits=linear_split_count(w,rows);
-    // Only measured dense mul1 geometries select the original-input R1 fusion.
     // Larger heads, other formats and GEMM retain the separately staged path.
-    bool measured_fusion=(w.bits==6 && w.input==5120 && w.output==1280) ||
-        (w.bits==5 && ((w.input==4096 && w.output==1024) ||
-          (w.input==8192 && w.output==5120) || (w.input==5120 && w.output==2304) ||
-          (w.input==2304 && w.output==5120)));
-    bool fused=!prefer_wmma && rows==1 && w.codebook==2 && measured_fusion;
+    bool fused=!prefer_wmma && rows==1 && w.codebook==2 && measured_fusion(w);
     hipError_t status;
     if(fused) {
         status=launch_gemv_fused_input(w,input,partial,rows,rows,splits,stream);

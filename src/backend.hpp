@@ -27,4 +27,11 @@ int linear_split_count(const DeviceWeights& weights, int rows);
 hipError_t launch_linear(const DeviceWeights& weights, const float* input,
     float* output, int rows, void* workspace, hipStream_t stream,
     float alpha, float beta, bool prefer_wmma);
+// Completion counter words a prepared plan needs to run this call as one launch (0: not applicable).
+// The counters must be zero before the first launch; every launch leaves them zero.
+size_t linear_completion_counters(const DeviceWeights& weights, int rows, bool prefer_wmma);
+// launch_linear with the output transform folded into the core for the cases above.
+hipError_t launch_linear_completed(const DeviceWeights& weights, const float* input,
+    float* output, int rows, void* workspace, uint32_t* counters, hipStream_t stream,
+    float alpha, float beta, bool prefer_wmma);
 }

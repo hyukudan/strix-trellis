@@ -18,6 +18,20 @@ session on the same machine.
   Disabling the option restores the earlier {64,2,16} schedule without
   pipelining. `dense_r1_group_probe`
   gains a `tuneg` mode that times the public grouped plan.
+- Opt-in one-launch completion for single-row prepared plans of the
+  fused-input shapes (`STRIX_TRELLIS_PLAN_FUSED_COMPLETION`, OFF): the last
+  thread block of each 128-column group folds the split partials (all 128
+  threads, ascending split order) and applies the output transform, so the
+  output transform launch disappears. Same bits (`plan_completion_qa`:
+  600/600 bitwise cases over alpha, beta, bias, rows 1/8, reuse and graph
+  replay after plan destruction). Plan R1, cold, three repetitions: `o_a`
+  slice 22.50 -> 19.30 µs (-14.2 %), `q_a` 34.43 -> 30.92 µs (-10.2 %),
+  shared w1 48.73 -> 46.05 µs (-5.5 %). It stays OFF because a control
+  cell that does not run the changed code, `q_a` R8 on the direct API
+  path, measured +0.19/+0.61/+0.88 %, which meets the pre-registered
+  regression condition; the cause is not established. Completion counters
+  belong to the weights handle; plan creation zeroes them and synchronizes.
+- README: EAQ `q_a` is K6 (was labelled K5).
 - Prefill: register-blocked WMMA GEMM core, default for codebook `mul1` at
   4–6 bits and at least 128 rows (`STRIX_TRELLIS_WMMA_TILED=0` selects the
   previous core; fewer rows, other codebooks and other bit rates keep it).

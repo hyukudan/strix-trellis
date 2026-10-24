@@ -7,6 +7,7 @@
 #include <climits>
 #include <cmath>
 #include <cstring>
+#include <vector>
 #include <limits>
 #include <new>
 
@@ -22,6 +23,9 @@ struct strix_weights_impl {
     void* allocation = nullptr;
     size_t allocation_bytes = 0;
     size_t plan_refs = 0;
+    // Completion counters of plans on these weights. Graphs captured from a plan may replay after the plan is
+    // destroyed but not after the weights are, so the counters live (one array per plan) until weights destroy.
+    std::vector<void*> completion_counters;
 };
 struct strix_linear_plan_impl {
     strix_context owner;
@@ -29,6 +33,7 @@ struct strix_linear_plan_impl {
     hipStream_t stream;
     int rows;
     bool prefer_wmma;
+    uint32_t* counters = nullptr;  // one-launch R1 completion counters (owned by the weights), zero between launches
 };
 
 namespace {
@@ -462,6 +467,11 @@ strix_status strix_weights_destroy(strix_weights w) {
     if (!w || w->plan_refs) return STRIX_ERROR_INVALID_ARGUMENT;
     auto s = context_check(w->owner);
     if (s != STRIX_SUCCESS) return s;
+    while (!w->completion_counters.empty()) {
+        const auto e = hipFree(w->completion_counters.back());
+        if (e != hipSuccess) return hip_status(e);
+        w->completion_counters.pop_back();
+    }
     const auto e = hipFree(w->allocation);
     if (e != hipSuccess) return hip_status(e);
     --w->owner->weights_count;
@@ -515,6 +525,23 @@ strix_status strix_linear_plan_create(strix_context c, const strix_matmul_desc* 
     if (d->weights->plan_refs == SIZE_MAX) return STRIX_ERROR_OUT_OF_MEMORY;
     auto plan = new (std::nothrow) strix_linear_plan_impl{c, *d, hs, call.rows, wmma};
     if (!plan) return STRIX_ERROR_OUT_OF_MEMORY;
+    const size_t counters = strix_trellis::linear_completion_counters(d->weights->device, call.rows, wmma);
+    if (counters) {
+        // Zero and complete before returning, so submissions and graph replays on any stream see zero counters.
+        void* p = nullptr;
+        auto e = hipMalloc(&p, counters * sizeof(uint32_t));
+        if (e == hipSuccess) e = hipMemsetAsync(p, 0, counters * sizeof(uint32_t), hs);
+        if (e == hipSuccess) e = hipStreamSynchronize(hs);
+        if (e == hipSuccess) {
+            try { d->weights->completion_counters.push_back(p); } catch (...) { e = hipErrorOutOfMemory; }
+        }
+        if (e != hipSuccess) {
+            if (p) (void)hipFree(p);
+            delete plan;
+            return hip_status(e);
+        }
+        plan->counters = static_cast<uint32_t*>(p);
+    }
     ++d->weights->plan_refs;
     *out = plan;
     return STRIX_SUCCESS;
@@ -524,9 +551,9 @@ strix_status strix_linear_plan_submit(strix_linear_plan p) {
     const auto s = context_check(p->owner);
     if (s != STRIX_SUCCESS || !p->rows) return s;
     const auto& d = p->desc;
-    return hip_status(strix_trellis::launch_linear(d.weights->device,
+    return hip_status(strix_trellis::launch_linear_completed(d.weights->device,
         static_cast<const float*>(d.input.data), static_cast<float*>(d.output.data),
-        p->rows, d.workspace, p->stream, d.alpha, d.beta, p->prefer_wmma));
+        p->rows, d.workspace, p->counters, p->stream, d.alpha, d.beta, p->prefer_wmma));
 }
 strix_status strix_linear_plan_destroy(strix_linear_plan p) {
     if (!p) return STRIX_ERROR_INVALID_ARGUMENT;

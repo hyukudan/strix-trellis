@@ -271,6 +271,18 @@ has completed and the graphs/executables have been destroyed. Destroying the
 plan only removes its explicit weight retention; it does not track graph
 ownership. Synchronizing the capture stream alone does not end graph lifetimes.
 
+With `STRIX_TRELLIS_PLAN_FUSED_COMPLETION` (build option, OFF by default), a single-row GEMV plan of a
+fused-input shape (for example the K6 `q_a` and K5 `o_a` projections) runs as
+one launch: the last thread block of each 128-column output group folds the
+split partials and applies the output transform, with the same arithmetic as
+the two-launch path, so the outputs are bit-identical. Such a plan allocates a
+small array of completion counters (one 128-byte line per 128 outputs). Creation zeroes
+them and synchronizes the plan's stream before it returns. The counters belong
+to the weights handle and are freed by `strix_weights_destroy`, so graphs
+captured from the plan stay valid after the plan is destroyed, under the rules
+above. Direct submissions and graph replays of one plan share its counters and
+workspace and must not overlap in time; distinct plans never share counters.
+
 The native `strix_trellis_prepared_api_probe` checks region preparation, frozen
 plans, full outputs, graph replay and timing separation; build/run commands are
 in [K2_LOCAL.md](K2_LOCAL.md).

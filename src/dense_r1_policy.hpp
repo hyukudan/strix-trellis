@@ -80,12 +80,22 @@ inline DenseR1Schedule dense_r1_schedule(int input,int output,int bits,int rows,
 }
 // Grouped wo_a schedule (4096 -> 1024), K4 S32 / K5 S16, rows 1..8. K4: COLD sweep (weights rotating over > MALL),
 // 128 columns, four tiles in flight, pipelined weight batches (dense_r1_group_pipelined) at every row count.
+// K5 with STRIX_TRELLIS_GROUP_K5_PIPELINE: the same schedule (full cold sweep of all 48 schedules, every one bit-identical:
+// best or within 0.74 % of the best at R1/R2/R6/R8); otherwise the earlier {64,2,16} without pipelining.
 inline DenseR1Schedule dense_r1_group_schedule(int input,int output,int bits,int rows,int splits) {
     (void)input;(void)output;(void)rows;(void)splits;
+#ifdef STRIX_TRELLIS_GROUP_K5_PIPELINE
+    return DenseR1Schedule{128,4,16,false};
+#else
     return bits==4 ? DenseR1Schedule{128,4,16,false} : DenseR1Schedule{64,2,16,false};
+#endif
 }
 inline bool dense_r1_group_pipelined(int input,int output,int bits,int rows,int splits) {
     (void)input;(void)output;(void)rows;(void)splits;
+#ifdef STRIX_TRELLIS_GROUP_K5_PIPELINE
+    return bits==4 || bits==5;
+#else
     return bits==4;
+#endif
 }
 } // namespace strix_trellis

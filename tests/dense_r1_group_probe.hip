@@ -355,6 +355,74 @@ int tune(int bits, const std::vector<int>& row_list) {
     return failures ? 1 : 0;
 }
 
+// Public grouped plan (the shipped schedule policy) on the o_a geometry, cold: one plan per weight copy, whole
+// rotations over PROBE_ROTATE_MB, PROBE_SWEEPS sweeps. Copy 0's output is checked byte for byte against row-by-row
+// strix_gemv before and after timing, and its FNV-1a bit hash is printed for cross-build comparison.
+int tuneg(int bits, const std::vector<int>& row_list) {
+    using namespace strix_trellis;
+    Runtime rt;
+    constexpr int G = 4;
+    const char* rot = std::getenv("PROBE_ROTATE_MB");
+    const size_t group_bytes = size_t(G) * I * N * bits / 8;
+    const int copies = rot ? int(std::max<size_t>(8, (size_t(std::atoi(rot)) << 20) / group_bytes + 1)) : 8;
+    const int calls = copies * std::max(1, (64 + copies - 1) / copies);
+    std::printf("GPLAN_ROTATION bits=%d copies=%d bytes=%zu calls_per_sweep=%d visited_bytes_per_sweep=%zu\n", bits, copies,
+                size_t(copies) * group_bytes, calls, size_t(calls) * group_bytes);
+    std::vector<std::unique_ptr<Weight>> ws;
+    for (int c = 0; c < copies * G; ++c) ws.push_back(std::make_unique<Weight>(rt, bits, uint32_t(c + 1)));
+    const uint64_t gb = generic_bytes(rt, ws[0]->handle);
+    Buffer gws(gb), alone(size_t(N) * 4);
+    int failures = 0;
+    for (int rows : row_list) {
+        const size_t xrs = size_t(G) * I, yrs = size_t(G) * N;
+        Buffer x(size_t(rows) * xrs * 4), y(size_t(rows) * yrs * 4);
+        const auto hx = inputs(rows, xrs, uint32_t(rows));
+        x.upload(hx.data(), x.bytes);
+        std::vector<unsigned char> expect(size_t(rows) * yrs * 4);
+        for (int g = 0; g < G; ++g)
+            for (int r = 0; r < rows; ++r) {
+                gemv(rt, ws[size_t(g)]->handle, x.f() + size_t(r) * xrs + size_t(g) * I, xrs, alone.f(), 1, gws.data, gb);
+                hip_ok(hipStreamSynchronize(rt.stream));
+                const auto av = alone.download();
+                std::memcpy(expect.data() + (size_t(r) * yrs + size_t(g) * N) * 4, av.data(), size_t(N) * 4);
+            }
+        std::vector<std::vector<strix_weights>> handles(static_cast<size_t>(copies));
+        uint64_t need = 0;
+        for (int c = 0; c < copies; ++c) {
+            for (int g = 0; g < G; ++g) handles[size_t(c)].push_back(ws[size_t(c * G + g)]->handle);
+            auto d = group_desc(handles[size_t(c)], rows, x.f(), xrs, x.bytes, y.f(), yrs, y.bytes);
+            uint64_t b = 0; api_ok(strix_grouped_gemv_workspace_bytes(rt.context, &d, &b), "grouped workspace query"); need = std::max(need, b);
+        }
+        Buffer work(need);
+        std::vector<strix_grouped_gemv_plan> plans(size_t(copies), nullptr);
+        for (int c = 0; c < copies; ++c) {
+            auto d = group_desc(handles[size_t(c)], rows, x.f(), xrs, x.bytes, y.f(), yrs, y.bytes);
+            d.workspace = work.data; d.workspace_bytes = work.bytes;
+            api_ok(strix_grouped_gemv_plan_create(rt.context, &d, &rt.descriptor, &plans[size_t(c)]), "grouped plan create");
+        }
+        auto run0 = [&]() {
+            hip_ok(hipMemset(y.data, 0xa5, y.bytes)); hip_ok(hipDeviceSynchronize());
+            api_ok(strix_grouped_gemv_plan_submit(plans[0])); hip_ok(hipStreamSynchronize(rt.stream));
+            return y.download();
+        };
+        const auto before = run0();
+        const double t = timed(rt, [&](int c) { api_ok(strix_grouped_gemv_plan_submit(plans[size_t(c)])); }, copies, 64);
+        const auto after = run0();
+        const bool exact = before == expect && after == expect;
+        if (!exact) ++failures;
+        uint64_t h = 1469598103934665603ull;
+        for (unsigned char b : after) h = (h ^ b) * 1099511628211ull;
+        const auto pol = dense_r1_group_schedule(I, N, bits, rows, dense_r1_group_splits(I, N, bits));
+        std::printf("GPLAN bits=%d rows=%d copies=%d sched={%d,%d,%d,%s} us=%.2f GBps=%.1f %s output_fnv=%llx\n", bits, rows, copies,
+                    pol.columns, pol.prefetch, pol.outputs_per_wave,
+                    dense_r1_group_pipelined(I, N, bits, rows, dense_r1_group_splits(I, N, bits)) ? "pipe" : "nopipe", t,
+                    double(group_bytes) / (t * 1e3), exact ? "EXACT" : "DIFF", (unsigned long long)h);
+        for (auto p : plans) api_ok(strix_grouped_gemv_plan_destroy(p));
+        std::fflush(stdout);
+    }
+    return failures ? 1 : 0;
+}
+
 // Cold schedule sweep of one dense-r1 LEGACY projection (I -> N, bits): copies of the weights rotate over > 96 MB.
 // Reference = the public plan (current policy) on copy 0; every schedule must reproduce its bytes.
 int tune1(int I1, int N1, int bits, const std::vector<int>& row_list) {
@@ -446,6 +514,11 @@ int tune1(int I1, int N1, int bits, const std::vector<int>& row_list) {
 int main(int argc, char** argv) {
     try {
         if (argc >= 2 && std::strcmp(argv[1], "check") == 0) return check();
+        if (argc >= 4 && std::strcmp(argv[1], "tuneg") == 0) {
+            std::vector<int> rows;
+            for (int k = 3; k < argc; ++k) rows.push_back(std::atoi(argv[k]));
+            return tuneg(std::atoi(argv[2]), rows);
+        }
         if (argc >= 4 && std::strcmp(argv[1], "tune") == 0) {
             std::vector<int> rows;
             for (int k = 3; k < argc; ++k) rows.push_back(std::atoi(argv[k]));

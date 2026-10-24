@@ -8,6 +8,16 @@ session on the same machine.
 
 ## Unreleased — 2026-10-24
 
+- Grouped K5 `wo_a` GEMV (4096 -> 1024, rows 1-8) uses the pipelined
+  {128,4,16} schedule of the K4 path by default
+  (`STRIX_TRELLIS_GROUP_K5_PIPELINE`, ON). Cold public-plan confirmation,
+  three repetitions, outputs bit-identical: paired-median reductions of
+  4.02 % at R1, 1.17 % at R2, 9.19 % at R6 and 11.55 % at R8 (R8
+  74.82 -> 66.19 µs). The K4 policy is unchanged and no K4 cell met the
+  registered regression condition (paired medians -0.22 to +0.17 %).
+  Disabling the option restores the earlier {64,2,16} schedule without
+  pipelining. `dense_r1_group_probe`
+  gains a `tuneg` mode that times the public grouped plan.
 - Prefill: register-blocked WMMA GEMM core, default for codebook `mul1` at
   4–6 bits and at least 128 rows (`STRIX_TRELLIS_WMMA_TILED=0` selects the
   previous core; fewer rows, other codebooks and other bit rates keep it).

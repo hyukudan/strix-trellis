@@ -86,6 +86,36 @@ void read_baseline(Runtime& r,const Fixture& f,size_t clones) {
     print_stats("event",event); print_stats("wall",wall);
     std::cout<<" compressed_GBs="<<packed.size()/event.median/1000<<"\n";
 }
+// FNV-1a over the output bits: equal values mean bit-identical outputs across builds.
+uint64_t fnv(const std::vector<float>& values) {
+    uint64_t h=1469598103934665603ull;
+    for(float v:values) {
+        uint32_t bits; std::memcpy(&bits,&v,4);
+        for(int b=0;b<4;++b) h=(h^((bits>>(8*b))&255u))*1099511628211ull;
+    }
+    return h;
+}
+// STRIX_BENCH_PATH=api (default) | plan | graph; STRIX_BENCH_ROWS=comma list limits the row counts.
+std::string bench_path() {
+    const char* v=std::getenv("STRIX_BENCH_PATH");
+    std::string mode=v?v:"api";
+    if(mode!="api" && mode!="plan" && mode!="graph") throw std::runtime_error("STRIX_BENCH_PATH must be api, plan or graph");
+    return mode;
+}
+bool selected_rows(uint32_t rows) {
+    const char* v=std::getenv("STRIX_BENCH_ROWS");
+    if(!v || !*v) return true;
+    std::string list=std::string(",")+v+",";
+    return list.find(","+std::to_string(rows)+",")!=std::string::npos;
+}
+struct Plans {
+    std::vector<strix_linear_plan> items;
+    ~Plans() { for(auto p:items) (void)strix_linear_plan_destroy(p); }
+};
+struct Graphs {
+    std::vector<std::pair<hipGraph_t,hipGraphExec_t>> items;
+    ~Graphs() { for(auto& g:items) { (void)hipGraphExecDestroy(g.second); (void)hipGraphDestroy(g.first); } }
+};
 void run(Runtime& r,const std::string& path) {
     Fixture f(path);
     const size_t packed=f.parts.at("trellis").size();
@@ -98,7 +128,7 @@ void run(Runtime& r,const std::string& path) {
         std::vector<std::unique_ptr<Weight>> weights;
         for(size_t c=0;c<clones;++c) weights.emplace_back(new Weight(r,f));
         for(uint32_t rows:{1u,2u,3u,4u,5u,6u,7u,8u,32u,64u,128u,129u,255u,256u,257u,511u,512u}) {
-            if(rows>f.rows) continue;
+            if(rows>f.rows || !selected_rows(rows)) continue;
             Device x(size_t(rows)*f.i*4),y(size_t(rows)*f.n*4);
             auto d=desc(weights[0]->w,x.p,y.p,rows,f,false,1,0);
             uint64_t bytes=0; api_check(strix_matmul_workspace_bytes(r.context,&d,&bytes));
@@ -109,13 +139,41 @@ void run(Runtime& r,const std::string& path) {
             if(gpu_bound>=(1ull<<30)) throw std::runtime_error("GPU allocation bound exceeds 1 GiB");
             upload(x.p,f.parts.at("x").data(),d.input.buffer_bytes,r);
             hip_check(hipStreamSynchronize(r.stream));
-            auto submit=[&](size_t c) {
+            auto api=[&](size_t c) {
                 d.weights=weights[c]->w;
                 api_check(rows<=8?strix_gemv(r.context,&d,&r.s):strix_gemm(r.context,&d,&r.s));
+            };
+            // Optional paths over the same clones: one prepared plan or one captured graph per clone.
+            const std::string mode=bench_path();
+            Plans plans; Graphs graphs; size_t graph_nodes_min=0,graph_nodes_max=0;
+            for(size_t c=0;c<clones && mode!="api";++c) {
+                d.weights=weights[c]->w;
+                if(mode=="plan") {
+                    strix_linear_plan p=nullptr;
+                    api_check(strix_linear_plan_create(r.context,&d,&r.s,
+                        rows<=8?STRIX_OPERATION_GEMV:STRIX_OPERATION_GEMM,&p));
+                    plans.items.push_back(p);
+                } else {
+                    hipGraph_t g=nullptr;
+                    hip_check(hipStreamBeginCapture(r.stream,hipStreamCaptureModeRelaxed));
+                    try { api(c); } catch(...) { (void)hipStreamEndCapture(r.stream,&g); if(g) (void)hipGraphDestroy(g); throw; }
+                    hip_check(hipStreamEndCapture(r.stream,&g));
+                    graphs.items.push_back({g,nullptr});
+                    size_t nodes=0; hip_check(hipGraphGetNodes(g,nullptr,&nodes));
+                    graph_nodes_min=c?std::min(graph_nodes_min,nodes):nodes;
+                    graph_nodes_max=std::max(graph_nodes_max,nodes);
+                    hip_check(hipGraphInstantiate(&graphs.items.back().second,g,nullptr,nullptr,0));
+                }
+            }
+            auto submit=[&](size_t c) {
+                if(mode=="plan") api_check(strix_linear_plan_submit(plans.items[c]));
+                else if(mode=="graph") hip_check(hipGraphLaunch(graphs.items[c].second,r.stream));
+                else api(c);
             };
             auto ref=f.floats("ref"); ref.resize(size_t(rows)*f.n);
             double checksum=0;
             uint64_t output_fnv=0;
+            bool output_fnv_set=false;
             auto check=[&](const char* phase) {
                 std::vector<float> actual(ref.size());
                 // Check every clone, including the last output after the sweep.
@@ -125,30 +183,35 @@ void run(Runtime& r,const std::string& path) {
                     hip_check(hipStreamSynchronize(r.stream));
                     compare(std::string("CHECK phase=")+phase+" rows="+std::to_string(rows)+" clone="+std::to_string(c),actual,ref);
                     checksum=std::accumulate(actual.begin(),actual.end(),0.0);
-                    // FNV-1a over the output bits: equal values mean bit-identical outputs across builds.
-                    output_fnv=1469598103934665603ull;
-                    for(float v:actual) {
-                        uint32_t bits; std::memcpy(&bits,&v,4);
-                        for(int b=0;b<4;++b) output_fnv=(output_fnv^((bits>>(8*b))&255u))*1099511628211ull;
-                    }
+                    // Every clone, before and after timing, must produce the same output bits.
+                    const uint64_t h=fnv(actual);
+                    if(output_fnv_set && h!=output_fnv) throw std::runtime_error("Output bits differ between clones or phases");
+                    output_fnv=h; output_fnv_set=true;
                 }
             };
             check("before");
-            auto event=measure(r,clones,true,submit);
-            auto wall=measure(r,clones,false,submit);
-            // Consume the output of the final timed sweep before another submit.
+            // Consume the output of the final sweep of each timed phase before another submit.
             std::vector<float> final(ref.size());
-            hip_check(hipMemcpyAsync(final.data(),y.p,d.output.buffer_bytes,hipMemcpyDeviceToHost,r.stream));
-            hip_check(hipStreamSynchronize(r.stream)); compare("CHECK phase=final_timed rows="+std::to_string(rows),final,ref);
+            auto timed_output=[&](const char* phase) {
+                hip_check(hipMemcpyAsync(final.data(),y.p,d.output.buffer_bytes,hipMemcpyDeviceToHost,r.stream));
+                hip_check(hipStreamSynchronize(r.stream));
+                compare(std::string("CHECK phase=")+phase+" rows="+std::to_string(rows),final,ref);
+                if(fnv(final)!=output_fnv) throw std::runtime_error(std::string("Output bits differ after ")+phase);
+            };
+            auto event=measure(r,clones,true,submit);
+            timed_output("final_event");
+            auto wall=measure(r,clones,false,submit);
+            timed_output("final_wall");
             check("after");
             const size_t minimal=payload+size_t(rows)*(f.i+f.n)*4;
-            std::cout<<"RESULT mode=cold api="<<(rows<=8?"gemv":"gemm")<<" rows="<<rows
+            std::cout<<"RESULT mode=cold path="<<mode<<" api="<<(rows<=8?"gemv":"gemm")<<" rows="<<rows
                      <<" clones="<<clones<<" cloned_bytes="<<clones*packed<<" minimal_bytes="<<minimal
                      <<" workspace_bytes="<<bytes<<" gpu_allocation_bound="<<gpu_bound<<" rotations="<<rotations;
             print_stats("event",event); print_stats("wall",wall);
             std::cout<<" compressed_GBs="<<packed/event.median/1000<<" useful_TOPS="
                      <<2.0*rows*f.i*f.n/event.median/1e6<<" checksum="<<checksum
-                     <<" output_fnv="<<std::hex<<output_fnv<<std::dec<<"\n";
+                     <<" output_fnv="<<std::hex<<output_fnv<<std::dec<<" output_bits=all_clones_and_phases"
+                     <<" graph_nodes_min="<<graph_nodes_min<<" graph_nodes_max="<<graph_nodes_max<<"\n";
         }
     }
     read_baseline(r,f,clones);

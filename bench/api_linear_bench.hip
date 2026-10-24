@@ -115,6 +115,7 @@ void run(Runtime& r,const std::string& path) {
             };
             auto ref=f.floats("ref"); ref.resize(size_t(rows)*f.n);
             double checksum=0;
+            uint64_t output_fnv=0;
             auto check=[&](const char* phase) {
                 std::vector<float> actual(ref.size());
                 // Check every clone, including the last output after the sweep.
@@ -124,6 +125,12 @@ void run(Runtime& r,const std::string& path) {
                     hip_check(hipStreamSynchronize(r.stream));
                     compare(std::string("CHECK phase=")+phase+" rows="+std::to_string(rows)+" clone="+std::to_string(c),actual,ref);
                     checksum=std::accumulate(actual.begin(),actual.end(),0.0);
+                    // FNV-1a over the output bits: equal values mean bit-identical outputs across builds.
+                    output_fnv=1469598103934665603ull;
+                    for(float v:actual) {
+                        uint32_t bits; std::memcpy(&bits,&v,4);
+                        for(int b=0;b<4;++b) output_fnv=(output_fnv^((bits>>(8*b))&255u))*1099511628211ull;
+                    }
                 }
             };
             check("before");
@@ -140,7 +147,8 @@ void run(Runtime& r,const std::string& path) {
                      <<" workspace_bytes="<<bytes<<" gpu_allocation_bound="<<gpu_bound<<" rotations="<<rotations;
             print_stats("event",event); print_stats("wall",wall);
             std::cout<<" compressed_GBs="<<packed/event.median/1000<<" useful_TOPS="
-                     <<2.0*rows*f.i*f.n/event.median/1e6<<" checksum="<<checksum<<"\n";
+                     <<2.0*rows*f.i*f.n/event.median/1e6<<" checksum="<<checksum
+                     <<" output_fnv="<<std::hex<<output_fnv<<std::dec<<"\n";
         }
     }
     read_baseline(r,f,clones);

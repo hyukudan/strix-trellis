@@ -98,7 +98,14 @@ void check_output(Runtime& r,const HeadData& f,const Guarded& y,int rows,const c
     }
     std::cout<<"HEAD_CHECK phase="<<phase<<" rows="<<rows<<" sampled_values="<<rows*f.blocks.size()*128
              <<" total_values="<<actual.size()<<" maxabs="<<worst_abs<<" max_row_block_nrmse="<<worst_nrms
-             <<" full_output_finite=1 checksum="<<std::accumulate(actual.begin(),actual.end(),0.0)<<'\n';
+             <<" full_output_finite=1 checksum="<<std::accumulate(actual.begin(),actual.end(),0.0);
+    // FNV-1a over the output bits: equal values mean bit-identical outputs across builds.
+    uint64_t fnv=1469598103934665603ull;
+    for(float v:actual) {
+        uint32_t bits; std::memcpy(&bits,&v,4);
+        for(int b=0;b<4;++b) fnv=(fnv^((bits>>(8*b))&255u))*1099511628211ull;
+    }
+    std::cout<<" output_fnv="<<std::hex<<fnv<<std::dec<<'\n';
 }
 void run_rows(Runtime& r,const HeadData& f,strix_weights w,int rows) {
     Guarded x(size_t(rows)*f.i*4,r),y(size_t(rows)*f.n*4,r);

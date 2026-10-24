@@ -122,6 +122,17 @@ See [LOADER.md](LOADER.md) for packing and lifetime details. These interfaces
 avoid host staging copies; they do not replace persistent HIP allocation with
 host-mapped GPU reads or promise a transfer speedup without measurement.
 
+### Device span of prepared weights
+
+`strix_weights_device_span` returns the base address and size of the single
+device allocation that holds the prepared trellis, `suh`, `svh` and optional
+bias, in the private prepared layout. The view is read-only and valid until
+`strix_weights_destroy`. It lets a caller read the bytes ahead of use, for
+example to warm caches while the GPU waits on other work; the library does not
+depend on it. Both outputs are cleared on error, and a NULL handle or output
+pointer returns `STRIX_ERROR_INVALID_ARGUMENT`. The macro
+`STRIX_TRELLIS_HAS_WEIGHTS_SPAN` marks headers that declare it.
+
 ## Lifecycle, device and streams
 
 All descriptors require exact struct_size, ABI version 1, and zero reserved

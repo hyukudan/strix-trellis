@@ -8,6 +8,11 @@ session on the same machine.
 
 ## Unreleased — 2026-10-24
 
+- `strix_weights_device_span` (`STRIX_TRELLIS_HAS_WEIGHTS_SPAN`): read-only
+  base and size of the prepared weights' device allocation, for callers that
+  read the bytes ahead of use. The library does not depend on it. Contract
+  test (NULL arguments, cleared outputs) and a GPU runtime check that the span
+  covers the uploaded trellis, `suh` and `svh`.
 - K2 expert pipeline for device-routed plans: owner maps are resolved once per
   replay (`STRIX_TRELLIS_TP_MOE_DEVICE_ROUTE_MAPS`), and one core serves both
   row classes (`STRIX_TRELLIS_TP_MOE_DEVICE_MERGED_CLASSES`, with the down core

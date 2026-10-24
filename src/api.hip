@@ -468,6 +468,14 @@ strix_status strix_weights_destroy(strix_weights w) {
     delete w;
     return STRIX_SUCCESS;
 }
+strix_status strix_weights_device_span(strix_weights w, const void** data, uint64_t* bytes) {
+    if (data) *data = nullptr;
+    if (bytes) *bytes = 0;
+    if (!w || !data || !bytes) return STRIX_ERROR_INVALID_ARGUMENT;
+    *data = w->allocation;
+    *bytes = w->allocation_bytes;
+    return STRIX_SUCCESS;
+}
 strix_status strix_matmul_workspace_bytes(strix_context c, const strix_matmul_desc* d, uint64_t* out) {
     if (!out) return STRIX_ERROR_INVALID_ARGUMENT;
     *out = 0;

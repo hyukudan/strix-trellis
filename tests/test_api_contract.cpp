@@ -171,6 +171,14 @@ int main() {
         for (auto value : host.reserved) assert(value == 0);
         for (auto value : device.reserved) assert(value == 0);
     }
+    {
+        static const int sentinel = 0;
+        const void* data = &sentinel;
+        uint64_t bytes = 1;
+        assert(strix_weights_device_span(nullptr, &data, &bytes) == STRIX_ERROR_INVALID_ARGUMENT);
+        assert(!data && !bytes);
+        assert(strix_weights_device_span(nullptr, nullptr, nullptr) == STRIX_ERROR_INVALID_ARGUMENT);
+    }
 #ifndef STRIX_TRELLIS_ENABLE_EXPERIMENTAL_TP
     // Disabled optional APIs clear outputs and cannot accidentally submit work,
     // probe HIP metadata or require valid runtime objects to report availability.

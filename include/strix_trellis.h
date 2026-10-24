@@ -276,6 +276,12 @@ strix_status strix_weights_prepare_parts(strix_context context,
     const strix_exl3_parts_desc *parts, const strix_stream *stream,
     strix_weights *out);
 strix_status strix_weights_destroy(strix_weights weights);
+/* Read-only view of the single device allocation of prepared weights, valid
+ * until destroy. For callers that warm caches ahead of use; the library does
+ * not depend on it. Outputs are cleared on error. */
+#define STRIX_TRELLIS_HAS_WEIGHTS_SPAN 1
+strix_status strix_weights_device_span(strix_weights weights,
+    const void **data, uint64_t *bytes);
 strix_status strix_matmul_workspace_bytes(strix_context context,
     const strix_matmul_desc *desc, uint64_t *out_bytes);
 strix_status strix_gemv(strix_context context, const strix_matmul_desc *desc,

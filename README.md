@@ -417,6 +417,7 @@ The public header is [`include/strix_trellis.h`](include/strix_trellis.h)
 |---|---|
 | `strix_context_create` / `_destroy` | Device context; queries device resources once. |
 | `strix_weights_prepare`, `strix_weights_prepare_parts`, `strix_weights_destroy` | Upload compressed weights from one blob or from borrowed regions. |
+| `strix_weights_device_span` | Read-only base and size of the prepared device allocation, for callers that warm caches ahead of use. |
 | `strix_matmul_desc_init`, `strix_matmul_workspace_bytes` | Describe a linear call (rows, alpha/beta, bias). |
 | `strix_gemv`, `strix_gemm` | Decode (1–8 rows) and prefill (WMMA) linear operators. |
 | `strix_linear_plan_create` / `_submit` / `_destroy` | Validate buffers and stream once, then submit repeatedly. |

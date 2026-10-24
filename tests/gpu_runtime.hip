@@ -140,6 +140,9 @@ struct Weight {
         d.transport_version=1; d.data=blob.data(); d.data_bytes=blob.size();
         d.metadata=&m; d.metadata_bytes=sizeof(m); d.rows=f.n; d.columns=f.i;
         api_check(strix_weights_prepare(rt.context,&d,&rt.s,&w));
+        { const void* data=nullptr; uint64_t bytes=0;  // the span covers at least the uploaded trellis, suh and svh
+          api_check(strix_weights_device_span(w,&data,&bytes));
+          if(!data || bytes < m.trellis_bytes + m.suh_bytes + m.svh_bytes) throw std::runtime_error("weights span"); }
         // All host transport storage expires here: prepare must have completed uploads.
     }
     ~Weight() {

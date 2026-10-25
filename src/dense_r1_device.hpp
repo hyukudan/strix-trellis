@@ -93,6 +93,7 @@ __device__ __forceinline__ void projection_body(const DenseR1Launch& a, Storage<
     const int first_h = begin / 8;
     using Reader = packed_decode::SaddrLane<Bits>;
     struct Batch { Reader reader[4]; };
+    struct Requested { typename Reader::Raw raw[4]; };
     const size_t stride = size_t(w.output / 16) * Bits * 8;
     // U=1/2/4 are independently measured schedules. No asynchronous load
     // is hidden from LLVM; it owns all VMEM dependencies and waitcnts.
@@ -103,9 +104,16 @@ __device__ __forceinline__ void projection_body(const DenseR1Launch& a, Storage<
             Reader(p + (U > 2 && base + 3 < Tiles ? 3*stride : 0))}};
     };
     // Pipe: the first weight batch is requested before the activation staging and
-    // every next batch before the current one is consumed (same arithmetic order).
-    Batch next{};
-    if constexpr (Pipe) next = load(0);
+    // every next batch before the current one is consumed (same arithmetic order);
+    // it is kept as loaded words and combined only when consumed.
+    const auto request = [&](int base) {
+        const uint32_t* p = w.trellis + size_t(begin + base) * stride + size_t(tile_n) * Bits * 8;
+        return Requested{{Reader::issue(p), Reader::issue(p + (U > 1 ? stride : 0)),
+            Reader::issue(p + (U > 2 && base + 2 < Tiles ? 2*stride : 0)),
+            Reader::issue(p + (U > 2 && base + 3 < Tiles ? 3*stride : 0))}};
+    };
+    Requested next{};
+    if constexpr (Pipe) next = request(0);
     // The admitted partition family has a constant H span. Avoid runtime
     // division by a variable span in every activation-staging iteration.
     constexpr int nh = CacheH;
@@ -114,13 +122,16 @@ __device__ __forceinline__ void projection_body(const DenseR1Launch& a, Storage<
     for (int job = wave; job < Rows * nh; job += Waves) {
         const int r = job / nh;
         const int h = job % nh;
-        float v[4];
+        float v[4], x[4], s[4];
         #pragma unroll
         for (int j = 0; j < 4; ++j) {
             const int col = (first_h + h) * 128 + lane + 32*j;
-            const float x = (Rows==8 || first + r < d.rows) ? d.x[size_t(first + r) * d.x_row_stride + col] : 0;
-            v[j] = float(_Float16(materialize_fp32(x * __half2float(__ushort_as_half(w.suh[col])))));
+            x[j] = (Rows==8 || first + r < d.rows) ? d.x[size_t(first + r) * d.x_row_stride + col] : 0;
+            s[j] = __half2float(__ushort_as_half(w.suh[col]));
         }
+        // all loads in flight before the first RN32 boundary (an asm volatile that orders them)
+        #pragma unroll
+        for (int j = 0; j < 4; ++j) v[j] = float(_Float16(materialize_fp32(x[j] * s[j])));
         hadamard128(v);
         #pragma unroll
         for (int j = 0; j < 4; ++j) {
@@ -137,9 +148,11 @@ __device__ __forceinline__ void projection_body(const DenseR1Launch& a, Storage<
     float sum[Rows][2] = {};
     #pragma unroll 1
     for (int base = 0; base < Tiles; base += U) {
-        Batch current = next;
+        Batch current;
         if constexpr (Pipe) {
-            if (base + U < Tiles) next = load(base + U);
+            #pragma unroll
+            for (int u = 0; u < 4; ++u) current.reader[u] = Reader(next.raw[u]);
+            if (base + U < Tiles) next = request(base + U);
         } else {
             current = load(base);
         }
@@ -254,7 +267,7 @@ __device__ __forceinline__ void projection_body(const DenseR1Launch& a, Storage<
     if (!threadIdx.x) __hip_atomic_store(a.counters+ci, 0u, __ATOMIC_RELEASE, __HIP_MEMORY_SCOPE_AGENT);
 }
 
-template<int Input, int Splits, int Bits, int Rows, int Columns, int U, bool HalfWave>
+template<int Input, int Splits, int Bits, int Rows, int Columns, int U, bool HalfWave, bool Pipe = false>
 __global__ __launch_bounds__((HalfWave || Columns == 8) ? Columns * 4 : Columns * 2) void projection(DenseR1Launch a) {
     __shared__ Storage<Input, Splits, Rows> shared;
     int split = int(blockIdx.y),nt = int(blockIdx.x);
@@ -263,7 +276,7 @@ __global__ __launch_bounds__((HalfWave || Columns == 8) ? Columns * 4 : Columns 
         const unsigned physical=(blockIdx.y*gridDim.x+blockIdx.x+a.schedule_rotation)%count;
         split=int(physical/gridDim.x);nt=int(physical%gridDim.x);
     }
-    projection_body<Input,Splits,Bits,Rows,Columns,U,HalfWave>(a, shared, split, nt, Rows==8?0:int(blockIdx.z));
+    projection_body<Input,Splits,Bits,Rows,Columns,U,HalfWave,Pipe>(a, shared, split, nt, Rows==8?0:int(blockIdx.z));
 }
 
 // Independent projections of one geometry in one dispatch: blockIdx.z selects
@@ -294,7 +307,13 @@ const void* bits(int b, bool pipe) {
         if (b == 4) return reinterpret_cast<const void*>(grouped<Input,Splits,4,Rows,Columns,U,HalfWave,false>);
         if (b == 5) return reinterpret_cast<const void*>(grouped<Input,Splits,5,Rows,Columns,U,HalfWave,false>);
     } else {
-        if (pipe) return nullptr;
+        if (pipe) {  // pipelined weight batches for the single plans: the 64/128-column 16-output bodies only
+            if constexpr (Columns >= 64 && !HalfWave) {
+                if (b == 4) return reinterpret_cast<const void*>(projection<Input,Splits,4,Rows,Columns,U,HalfWave,true>);
+                if (b == 5) return reinterpret_cast<const void*>(projection<Input,Splits,5,Rows,Columns,U,HalfWave,true>);
+            }
+            return nullptr;
+        }
         if (b == 4) return reinterpret_cast<const void*>(projection<Input,Splits,4,Rows,Columns,U,HalfWave>);
         if (b == 5) return reinterpret_cast<const void*>(projection<Input,Splits,5,Rows,Columns,U,HalfWave>);
     }

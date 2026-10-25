@@ -18,6 +18,7 @@ int resource_error = 0, dense_error = 0, gate_error = 0, down_error = 0, core_er
 bool supported = true;
 unsigned dense_resources = 0, moe_resources = 0, dense_calls = 0, gate_calls = 0, down_calls = 0;
 int resource_bits = 0, resource_rows = 0;
+int owner_resources = 0;
 strix_trellis::TpDenseArguments dense{};
 strix_trellis::TpSplitLaunch split{};
 strix_trellis::DenseR1Launch r1{};
@@ -44,6 +45,18 @@ hipError_t query_dense_r1_pair_resources(const DenseR1Pair&, size_t, bool* suppo
 }
 hipError_t launch_dense_r1_pair_trusted(const DenseR1Pair& p, hipStream_t stream) {
     tp_fake::r1=p.member[0]; ++fake::launches; fake::last_stream=stream; return tp_fake::dense_error;
+}
+// Owner-fold kernels: reported unsupported, so plans keep the split dispatch checked above.
+hipError_t query_dense_r1_group_owner_resources(const DenseR1Launch&, size_t, bool* supported) {
+    ++tp_fake::owner_resources; *supported=false; return hipSuccess;
+}
+hipError_t launch_dense_r1_group_owner_trusted(const DenseR1Group& g, int, hipStream_t stream) {
+    assert(!"owner-fold dispatch is never selected by these plans");
+    tp_fake::r1=g.member[0]; ++fake::launches; fake::last_stream=stream; return tp_fake::dense_error;
+}
+hipError_t launch_dense_r1_owner_trusted(const DenseR1Launch& a, hipStream_t stream) {
+    assert(!"owner-fold dispatch is never selected by these plans");
+    tp_fake::r1=a; ++fake::launches; fake::last_stream=stream; return tp_fake::dense_error;
 }
 hipError_t query_tp_split_resources(const TpSplitLaunch&, size_t, bool* supported) {
     ++tp_fake::dense_resources;

@@ -113,13 +113,16 @@ __device__ __forceinline__ void produce(TpSplitLaunch a, int member, int ob, int
     const auto part = tp_split_partition(Input, split, Splits);
     for (int job = wave; job < Rows * nh; job += 8) {
         const int row = job / nh, h = job % nh;
-        float value[4];
+        float value[4], x[4], s[4];
         #pragma unroll
         for (int j = 0; j < 4; ++j) {
             const int col = (part.first_h128 + h) * 128 + lane + 32*j;
-            const float x = (Rows==8 || first + row < d.rows) ? d.x[size_t(first + row) * d.x_row_stride + col] : 0;
-            value[j] = float(_Float16(materialize_fp32(x * __half2float(__ushort_as_half(w.suh[col])))));
+            x[j] = (Rows==8 || first + row < d.rows) ? d.x[size_t(first + row) * d.x_row_stride + col] : 0;
+            s[j] = __half2float(__ushort_as_half(w.suh[col]));
         }
+        // all loads in flight before the first RN32 boundary (an asm volatile that orders them)
+        #pragma unroll
+        for (int j = 0; j < 4; ++j) value[j] = float(_Float16(materialize_fp32(x[j] * s[j])));
         hadamard128(value);
         #pragma unroll
         for (int j = 0; j < 4; ++j) {

@@ -60,6 +60,8 @@ extern "C" strix_status strix_tp_dense_plan_create_r1(strix_context c,
         a.projection.weights.output,a.projection.weights.bits,a.projection.rows_per_block,a.splits);
     a.columns_per_block=schedule.columns;
     a.prefetch=schedule.prefetch;
+    a.pipelined=strix_trellis::dense_r1_pipelined(a.projection.weights.input,a.projection.weights.output,
+        a.projection.weights.bits,a.projection.rows_per_block,a.splits);
     a.outputs_per_wave=schedule.outputs_per_wave;
     const bool use_split=schedule.use_splitk04 &&
         strix_trellis::tp_split_geometry(a.projection.weights.input,a.projection.weights.output) &&
@@ -78,6 +80,13 @@ extern "C" strix_status strix_tp_dense_plan_create_r1(strix_context c,
     const auto completion=hipStreamSynchronize(hs);
     if(e != hipSuccess || completion != hipSuccess) { delete p; return hip_status(e != hipSuccess ? e : completion); }
     *p={c,d->weights,a.projection,hs}; p->r1=a; p->use_r1=!use_split;p->use_split=use_split;p->split=split;
+    if (strix_trellis::dense_r1_owner(a.projection.weights.input,a.projection.weights.output,a.projection.weights.bits,
+                                      a.projection.rows,a.splits) && a.projection.rows_per_block==a.projection.rows) {
+        bool owner_ok=false;
+        if (strix_trellis::query_dense_r1_group_owner_resources(a,props.sharedMemPerBlock,&owner_ok)==hipSuccess && owner_ok) {
+            p->use_owner=true; p->use_r1=false; p->use_split=false;
+        }
+    }
     ++p->weights->plan_refs; *out=p; return STRIX_SUCCESS;
 }
 #else

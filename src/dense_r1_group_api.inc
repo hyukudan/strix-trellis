@@ -6,6 +6,7 @@ struct strix_grouped_gemv_plan_impl {
     int count = 0;
     strix_trellis::DenseR1Group group{};
     hipStream_t stream = nullptr;
+    bool owner_fold = false;  // owner-fold kernel (same bits)
 };
 namespace dense_r1_group_api {
 using namespace strix_trellis;
@@ -115,6 +116,14 @@ extern "C" strix_status strix_grouped_gemv_plan_create(strix_context c, const st
     const auto completion = hipStreamSynchronize(hs);
     if (e != hipSuccess || completion != hipSuccess) { delete p; return hip_status(e != hipSuccess ? e : completion); }
     p->owner = c; p->count = v.count; p->group = v.group; p->stream = hs;
+    {
+        const auto& m0 = v.group.member[0];
+        bool owner_ok = false;
+        if (strix_trellis::dense_r1_owner(m0.projection.weights.input, m0.projection.weights.output, m0.projection.weights.bits,
+                                          m0.projection.rows, m0.splits) &&
+            strix_trellis::query_dense_r1_group_owner_resources(m0, props.sharedMemPerBlock, &owner_ok) == hipSuccess && owner_ok)
+            p->owner_fold = true;
+    }
     for (int g = 0; g < v.count; ++g) { p->retained[g] = v.weights[g]; ++v.weights[g]->plan_refs; }
     *out = p; return STRIX_SUCCESS;
 }
@@ -122,6 +131,7 @@ extern "C" strix_status strix_grouped_gemv_plan_submit(strix_grouped_gemv_plan p
     if (!p) return STRIX_ERROR_INVALID_ARGUMENT;
     const auto s = context_check(p->owner);
     if (s != STRIX_SUCCESS) return s;
+    if (p->owner_fold) return hip_status(strix_trellis::launch_dense_r1_group_owner_trusted(p->group, p->count, p->stream));
     return hip_status(strix_trellis::launch_dense_r1_group_trusted(p->group, p->count, p->stream));
 }
 extern "C" strix_status strix_grouped_gemv_plan_destroy(strix_grouped_gemv_plan p) {

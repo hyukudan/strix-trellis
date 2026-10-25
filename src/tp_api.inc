@@ -46,6 +46,7 @@ struct strix_tp_dense_plan_impl {
     bool use_split = false;
     strix_trellis::DenseR1Launch r1{};
     bool use_r1 = false;
+    bool use_owner = false;  // dense-r1 with the partials folded by the owning CTA (same bits)
     strix_trellis::DenseR1Pair pair{};  // dense-r1 q_a + kv in one dispatch (second member's weights retained)
     strix_weights second = nullptr;
     bool use_pair = false;
@@ -256,6 +257,7 @@ strix_status strix_tp_dense_plan_submit(strix_tp_dense_plan p) {
     const auto s = context_check(p->owner);
     if (s != STRIX_SUCCESS) return s;
     if (p->use_pair) return hip_status(strix_trellis::launch_dense_r1_pair_trusted(p->pair, p->stream));
+    if (p->use_owner) return hip_status(strix_trellis::launch_dense_r1_owner_trusted(p->r1, p->stream));
     if (p->use_r1) return hip_status(strix_trellis::launch_dense_r1_trusted(p->r1, p->stream));
     return hip_status(p->use_split ? strix_trellis::launch_tp_split_trusted(p->split, p->stream)
         : strix_trellis::launch_tp_dense_trusted(p->arguments, p->stream));

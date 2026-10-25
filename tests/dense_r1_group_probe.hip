@@ -349,6 +349,26 @@ int tune(int bits, const std::vector<int>& row_list) {
                 }
         std::printf("GROUP_SWEEP bits=%d rows=%d measured=%d unsupported=%d exact=%d policy_recorded=%d\n", bits, rows, measured, unsupported,
                     exact_count, policy_bytes.empty() ? 0 : 1);
+        {  // owner-fold variant (partials folded by the CTA owning the output H128)
+            std::vector<DenseR1Group> grp(copies);
+            for (int c = 0; c < copies; ++c)
+                for (int g = 0; g < G; ++g) {
+                    auto& a = grp[size_t(c)].member[g];
+                    a.projection = {ws[size_t(c * G + g)]->raw, x.f() + size_t(g) * I, y.f() + size_t(g) * N, rows > 1 ? xrs : 0,
+                                    rows > 1 ? yrs : 0, rows, 1.0f, 0.0f, rows};
+                    a.splits = splits;
+                }
+            bool supported = false;
+            if (query_dense_r1_group_owner_resources(grp[0].member[0], 65536, &supported) == hipSuccess && supported) {
+                hip_ok(hipMemset(y.data, 0xa5, y.bytes)); hip_ok(hipDeviceSynchronize());
+                hip_ok(launch_dense_r1_group_owner_trusted(grp[0], G, rt.stream)); hip_ok(hipStreamSynchronize(rt.stream));
+                const bool exact = y.download() == expect;
+                const double t = timed(rt, [&](int c) { hip_ok(launch_dense_r1_group_owner_trusted(grp[size_t(c)], G, rt.stream)); }, copies, 64);
+                if (!exact) ++failures;
+                std::printf("GROUP_OWNER bits=%d rows=%d us=%.2f GBps=%.1f %s\n", bits, rows, t, double(G) * I * N * bits / 8 / (t * 1e3),
+                            exact ? "EXACT" : "DIFF");
+            } else std::printf("GROUP_OWNER bits=%d rows=%d unsupported\n", bits, rows);
+        }
         std::printf("GROUP_BEST bits=%d rows=%d sched={%s} us=%.2f vs linplan4 %.2f gemv4 %.2f\n", bits, rows, best_s.c_str(), best, t_plan, t_gemv);
         std::fflush(stdout);
     }
@@ -492,17 +512,18 @@ int tune1(int I1, int N1, int bits, const std::vector<int>& row_list) {
         Buffer work(member * size_t(copies));
         hip_ok(hipMemset(work.data, 0, work.bytes)); hip_ok(hipDeviceSynchronize());
         double best = 1e30; std::string best_s;
+        for (int pipe : {0, 1})
         for (int cols : {32, 64, 128})
             for (int outs : {16, 8})
                 for (int u : {1, 2, 4}) {
-                    if (N1 % cols) continue;
+                    if (N1 % cols || (pipe && (cols < 64 || outs != 16))) continue;
                     std::vector<DenseR1Launch> L(static_cast<size_t>(copies));
                     for (int c = 0; c < copies; ++c) {
                         auto& a = L[size_t(c)];
                         a.projection = {ws[size_t(c)]->raw, x.f(), y.f(), size_t(I1), size_t(N1), rows, 1.0f, 0.0f, rows};
                         char* base = static_cast<char*>(work.data) + member * size_t(c);
                         a.partial = reinterpret_cast<float*>(base); a.counters = reinterpret_cast<uint32_t*>(base + partial);
-                        a.splits = splits; a.columns_per_block = cols; a.prefetch = u; a.outputs_per_wave = outs;
+                        a.splits = splits; a.columns_per_block = cols; a.prefetch = u; a.outputs_per_wave = outs; a.pipelined = pipe != 0;
                     }
                     bool supported = false;
                     if (query_dense_r1_resources(L[0], 65536, &supported) != hipSuccess || !supported) continue;
@@ -511,10 +532,27 @@ int tune1(int I1, int N1, int bits, const std::vector<int>& row_list) {
                     const bool exact = y.download() == expect;
                     const double t = timed(rt, [&](int c) { hip_ok(launch_dense_r1_trusted(L[size_t(c)], rt.stream)); }, copies, 64);
                     if (!exact) ++failures;
-                    std::printf("TUNE1_SCHED I=%d N=%d bits=%d rows=%d cols=%d outs=%d u=%d us=%.2f GBps=%.1f %s\n", I1, N1, bits, rows, cols,
-                                outs, u, t, double(wbytes) / (t * 1e3), exact ? "EXACT" : "DIFF");
-                    if (exact && t < best) { best = t; best_s = std::to_string(cols) + "," + std::to_string(u) + "," + std::to_string(outs); }
+                    std::printf("TUNE1_SCHED I=%d N=%d bits=%d rows=%d pipe=%d cols=%d outs=%d u=%d us=%.2f GBps=%.1f %s\n", I1, N1, bits, rows,
+                                pipe, cols, outs, u, t, double(wbytes) / (t * 1e3), exact ? "EXACT" : "DIFF");
+                    if (exact && t < best) { best = t; best_s = std::to_string(cols) + "," + std::to_string(u) + "," + std::to_string(outs) + (pipe ? ",pipe" : ""); }
                 }
+        {  // owner-fold variant
+            DenseR1Launch o{};
+            o.projection = {ws[0]->raw, x.f(), y.f(), size_t(I1), size_t(N1), rows, 1.0f, 0.0f, rows};
+            o.splits = splits;
+            bool supported = false;
+            if (query_dense_r1_group_owner_resources(o, 65536, &supported) == hipSuccess && supported) {
+                std::vector<DenseR1Launch> L(static_cast<size_t>(copies), o);
+                for (int c = 0; c < copies; ++c) L[size_t(c)].projection.weights = ws[size_t(c)]->raw;
+                hip_ok(hipMemset(y.data, 0xa5, y.bytes)); hip_ok(hipDeviceSynchronize());
+                hip_ok(launch_dense_r1_owner_trusted(L[0], rt.stream)); hip_ok(hipStreamSynchronize(rt.stream));
+                const bool exact = y.download() == expect;
+                const double t = timed(rt, [&](int c) { hip_ok(launch_dense_r1_owner_trusted(L[size_t(c)], rt.stream)); }, copies, 64);
+                if (!exact) ++failures;
+                std::printf("TUNE1_OWNER I=%d N=%d bits=%d rows=%d us=%.2f GBps=%.1f %s\n", I1, N1, bits, rows, t, double(wbytes) / (t * 1e3),
+                            exact ? "EXACT" : "DIFF");
+            }
+        }
         std::printf("TUNE1_BEST I=%d N=%d bits=%d rows=%d sched={%s} us=%.2f GBps=%.1f vs policy %.2f\n", I1, N1, bits, rows, best_s.c_str(),
                     best, double(wbytes) / (best * 1e3), t_policy);
         std::fflush(stdout);

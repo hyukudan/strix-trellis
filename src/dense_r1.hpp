@@ -15,7 +15,7 @@ struct DenseR1Launch {
     int outputs_per_wave = 16; // 8 exposes both N8 halves as independent waves.
     unsigned schedule_rotation = 0; // Correctness perturbation, zero in timings.
     uint16_t* activation = nullptr; // Optional [rows,input] diagnostic, ob=0.
-    bool pipelined = false; // grouped kernels only: weight batches requested ahead (same arithmetic)
+    bool pipelined = false; // weight batches requested ahead (same arithmetic); single plans: 64/128 cols, 16 outputs
 };
 hipError_t launch_dense_r1_trusted(const DenseR1Launch&, hipStream_t);
 hipError_t query_dense_r1_resources(const DenseR1Launch&, size_t available_shared, bool* supported);
@@ -27,6 +27,10 @@ struct DenseR1Group {
     DenseR1Launch member[dense_r1_group_max]{};
 };
 hipError_t launch_dense_r1_group_trusted(const DenseR1Group&, int count, hipStream_t);
+// Partials folded by the CTA owning each output H128 (no partial planes, no counters): wo_a S32, q_b S4, o_b S4.
+hipError_t launch_dense_r1_group_owner_trusted(const DenseR1Group&, int count, hipStream_t);
+hipError_t launch_dense_r1_owner_trusted(const DenseR1Launch&, hipStream_t);  // single projection (q_b, o_b K-half)
+hipError_t query_dense_r1_group_owner_resources(const DenseR1Launch& first, size_t available_shared, bool* supported);
 // q_a (5120 -> 1280, S16) + kv (5120 -> 512, S32) LEGACY members of one input in one dispatch.
 struct DenseR1Pair {
     DenseR1Launch member[2]{};

@@ -60,6 +60,24 @@ neither. A failed/asynchronously aborted dispatch leaves workspace state
 unspecified: recreate the plan before reuse. Destroy captured graphs and
 complete all work before destroying the plan, weights, buffers, or stream.
 
+Owner-fold kernel. For the grouped K4 `wo_a` (4096 -> 1024, 32 partitions,
+rows 1-8) the plan uses a different execution with the same arithmetic: one
+16-wave CTA per output H128 computes the partitions in passes with the same
+chains, keeps each partition's partial in LDS and folds it from +0 in
+ascending partition order. Outputs are bit-identical to the split plan, and
+it uses neither global partial planes nor counters. Its weight batches are
+double-buffered. The selection is part of the shipped policy
+(`dense_r1_owner`); the single dense R1 plans of the K4 `o_b` K-half (4096 ->
+5120, 4 partitions, rows 1-4) use pipelined weight batches
+(`dense_r1_pipelined`). Process-wide switches, read once, same bits either
+way:
+
+| Variable | Effect |
+|---|---|
+| `STRIX_TRELLIS_DENSE_OWNER=0` | grouped K4 `wo_a` uses the split plan |
+| `STRIX_TRELLIS_DENSE_PIPE=0` | no pipelined weight batches in dense R1 plans (single and grouped) |
+| `STRIX_TRELLIS_OWNER_PREFETCH=0` | owner-fold without double-buffered weights |
+
 ## C API
 
 Query `strix_tp_dense_r1_workspace_bytes(context, desc, rows_per_block,

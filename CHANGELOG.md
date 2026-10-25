@@ -6,7 +6,7 @@ Source versions follow `STRIX_TRELLIS_VERSION_*` in
 below compare one of our builds with the previous one, measured in the same
 session on the same machine.
 
-## Unreleased — 2026-10-24
+## Unreleased — 2026-10-25
 
 - Direct-output R8 GEMV (`q_b`, `o_b`, shared down and output head): the
   packed words of the next K16 row are requested before the current row
@@ -54,12 +54,50 @@ session on the same machine.
   stability flags, so the confirmation was inconclusive and the option
   remains OFF. Completion counters
   belong to the weights handle; plan creation zeroes them and synchronizes.
-- README: EAQ `q_a` is K6 (was labelled K5).
-- README: grouped `o_a` table re-measured with the K5 pipelined schedule
-  (K5 R8 84.57 -> 66.47 µs, 50.3 -> 63.9 % of the read ceiling); the
-  rotation is stated as measured (648 MiB K4, 650 MiB K5).
-  `dense_r1_group_probe tuneg` also times the four projections as four
+- Dense R1 owner-fold kernel: one 16-wave thread block per output H128
+  computes the logical K splits in passes, keeps each split partial in LDS
+  and folds it from +0 in ascending split order (same bits as the split
+  plan, no global partial planes or counters), with double-buffered weight
+  batches (`STRIX_TRELLIS_OWNER_PREFETCH=0` selects the single-buffered
+  body). Selected for the grouped K4 `wo_a` (4096 -> 1024, 32 splits) at
+  rows 1-8 (`STRIX_TRELLIS_DENSE_OWNER=0` disables it). Single dense R1
+  plans of the K4 `o_b` K-half (4096 -> 5120, 4 splits) use pipelined
+  weight batches at rows 1-4 (`STRIX_TRELLIS_DENSE_PIPE=0` disables the
+  pipelined selections) and the U2 schedule at every row count. Staging
+  issues all x and `suh` loads of a 128-value block before the first FP32
+  boundary. Same bits. Same session against the split plan (K4 grouped
+  `wo_a`, median of three paired runs): faster at every row count 1-8
+  (R1 46.48 -> 44.52 µs, R8 68.83 -> 67.61 µs); against the previous release
+  the dense R1 plans are faster in 27 of 28 README cells (up to 7 %); the
+  output head plan at R2 was +0.6 %. That cell (5120 -> 64640 K5, two rows
+  in one block, schedule {64,4,8}) keeps the previous staging order, with
+  instructions identical to the previous release's kernel; every other
+  kernel is unchanged and the bits are the same. Confirmation session (two
+  blocks of three paired runs, previous release / this order / the new
+  order): +0.11 % against the previous release (95 % interval -0.05 to
+  +0.27 %), the new order +0.88 % (+0.56 to +1.20 %).
+- README: decode rows of `q_b`, `o_b`, shared down and the output head, the
+  grouped `o_a` table and the dense R1 plan table measured again on this
+  revision (2026-10-25), alternating with the previous release (and V16 for
+  the decode rows); other rows kept (unchanged kernels).
+  `dense_r1_group_probe tuneg` also times the four `o_a` projections as four
   `strix_gemv` calls over the same rotation (`gemv4_us`).
+- Prefill: the fused output epilogue of the tiled WMMA core is on by
+  default for single-split calls whose grid has more blocks than the device
+  has multiprocessors as reported by HIP (`STRIX_TRELLIS_WMMA_TILED_FUSED=auto`;
+  threshold `STRIX_TRELLIS_WMMA_TILED_FUSED_MIN_BLOCKS`, default that count
+  + 1: 21 on gfx1151, where HIP counts 20 WGPs). The cells where it was
+  slower are grids of at most one block per WGP and keep
+  the separate transform. `=0` (or `off`, `false`) restores the separate
+  transform everywhere, `=1` fuses whenever possible. Same bits in every
+  mode. Over 12 process pairs on two devices no fused cell was significantly
+  (95 %) and materially (> 1 %) slower than the separate transform; summed
+  time of the measured cells -13 to -14 %. `prefill_tiled_bench` gains a
+  paired fused/separate A/B (`STRIX_BENCH_PAIRED`, `STRIX_BENCH_PAIRS`,
+  `STRIX_BENCH_REPS`, `STRIX_BENCH_ONLY`) with quartiles.
+
+## 2026-10-24
+
 - Prefill: register-blocked WMMA GEMM core, default for codebook `mul1` at
   4–6 bits and at least 128 rows (`STRIX_TRELLIS_WMMA_TILED=0` selects the
   previous core; fewer rows, other codebooks and other bit rates keep it).
@@ -78,9 +116,6 @@ session on the same machine.
   30 % faster in most cells, but slower than the separate transform in
   three small cells (shared down K4 M 128 by 6–13 %, `q_a` K4 M 128 by
   2–4 %, `o_a` slice K4 M 256).
-- `STRIX_TRELLIS_WMMA_TILED_FUSED=auto` (now the default; `=0` restores RC4): fused epilogue only for calls whose grid has
-  more blocks than the device has CUs (`STRIX_TRELLIS_WMMA_TILED_FUSED_MIN_BLOCKS`, default CU count + 1); the three slow cells above are 5-20-block
-  grids and keep the separate transform. Same bits as both other modes.
 - `api_linear_bench`: `STRIX_BENCH_PATH=api|plan|graph` and `STRIX_BENCH_ROWS`;
   every clone and phase must give the same output bits.
 - README: measured `gfx1151` WMMA ceiling (burst 53.9 TOPS FP16, sustained

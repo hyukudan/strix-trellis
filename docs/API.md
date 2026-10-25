@@ -64,7 +64,8 @@ K16 accumulation order per output are unchanged; only the block tiling, the
 LDS layout and the block order differ. With one split it can also apply the
 output transform (H128, `svh`, bias, alpha/beta) in its epilogue, with the
 same arithmetic and bits as the separate transform. By default it does so
-only when the call's grid has more blocks than the device has CUs: on
+only when the call's grid has more blocks than HIP reports
+multiprocessors for the device (20 on gfx1151, where HIP counts WGPs): on
 one-wave grids the epilogue was slower than the separate transform.
 Process-wide flags, read once:
 
@@ -73,7 +74,7 @@ Process-wide flags, read once:
 | `STRIX_TRELLIS_WMMA_TILED=0` | use the previous WMMA core everywhere |
 | `STRIX_TRELLIS_WMMA_TILED_FUSED=0` (or `off`, `false`) | separate output transform everywhere (the previous default) |
 | `STRIX_TRELLIS_WMMA_TILED_FUSED=1` | apply the output transform in the core's epilogue whenever possible (one split only) |
-| `STRIX_TRELLIS_WMMA_TILED_FUSED=auto` (default) | as `=1`, but only when the call's grid has at least `STRIX_TRELLIS_WMMA_TILED_FUSED_MIN_BLOCKS` blocks (default: the device CU count + 1, i.e. more than one block per CU); same bits |
+| `STRIX_TRELLIS_WMMA_TILED_FUSED=auto` (default) | as `=1`, but only when the call's grid has at least `STRIX_TRELLIS_WMMA_TILED_FUSED_MIN_BLOCKS` blocks (default: HIP's multiprocessor count + 1, i.e. 21 on gfx1151, more than one block per WGP); same bits |
 | `STRIX_TRELLIS_WMMA_RASTER=<1..64>` | block-order group size (measurement only; bits unchanged) |
 
 ## Modern EXL3 host transport

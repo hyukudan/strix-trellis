@@ -19,8 +19,9 @@ The decode, GEMV, GEMM and transform kernels are written from scratch. See
 > against that engine's reference. The K2 expert paths are measured on the GPU
 > at operator level, bit-exact, but are not yet used in a full model. A few
 > paths are CPU-tested only. The C ABI is at version 1 and the library is at
-> 0.3.0. The [status table](#status) gives the level and the evidence for each
-> component.
+> 0.3.0; the current release checkpoint is **RC6** (`7a33c4b`,
+> 2026-10-25), following RC5 (`5e86cb6`) on the same date. The
+> [status table](#status) gives the level and the evidence for each component.
 
 ## At a glance
 
@@ -35,6 +36,31 @@ The decode, GEMV, GEMM and transform kernels are written from scratch. See
 | Compile GPU kernels | [Build with HIP](#build-with-hip); enable experimental options only when needed. |
 | Integrate into an engine | [C ABI](#api-overview), [API contract](docs/API.md), [build guide](docs/BUILD.md) and [GPU tests](docs/GPU_TESTS.md). |
 | Reproduce benchmarks | [Measurements and commands](#measured-performance), [GPU test protocol](docs/GPU_TESTS.md). |
+
+### RC6 defaults and engine adoption
+
+| Path | Shipped policy | Measured evidence |
+|---|---|---|
+| Grouped `o_a` | Owner-fold for K4 R1–R8 and K5 R1–R4; K5 R5–R8 keep the pipelined split plan. | RC6 K5 R1: **51.27 µs**, **82.9 %** of the read ceiling; bit-identical to RC5 and independent R1 calls. [Grouped measurements](#grouped-gemv-o_a-decode-one-rank). |
+| Dense TP plans | Issue staging loads before the first FP32 rounding boundary; pipeline K4 `o_b` at R1–R4. The K5 head at R2 retains its previous staging order. | [Cold plan measurements](#dense-r1-tp-plans-decode-one-rank); each row retains its declared S4 or LEGACY identity. |
+| Direct-output R8 | Dual-issue dot order and next-row packed-weight prefetch enabled. | [Decode measurements](#decode-gemv); outputs unchanged bit for bit. |
+| WMMA prefill | Register-blocked `mul1` K4–K6 core from 128 rows; fuse the output epilogue for single-split grids of at least 21 blocks on gfx1151. | Auto-fusion reduced summed operator time by **13–14 %**, with identical output bits. [Prefill measurements](#prefill-wmma-gemm). |
+
+These are operator measurements on DeepSeek V4.1 Flash tensors or synthetic
+weights of its shapes, not prompt-throughput results. Conditions and commands
+are given below. Prepared-R1 one-launch completion remains opt-in and OFF.
+
+The [Strix Halo engine](https://github.com/hyukudan/strix-halo-engine-lab)
+uses this library for attention, shared-expert projections and the head on
+two Strix Halo nodes over USB4. Attention uses the dense TP plans. Its
+measured attention integration uses the
+dense-plan series at `1e8011b`, incorporated into RC5; later engine builds
+also carry a separate activation extension outside RC6. A full-model relink
+against RC6 is pending qualification. The engine owns routing, buffers,
+streams and inter-rank reductions; its routed experts use a different format
+and do not call this library's K2 pipeline. The register-blocked WMMA core,
+R8 direct-output changes and K5 owner-fold policy have operator qualification;
+their full-model adoption is not established by those timings.
 
 ## Install and try it
 
@@ -145,7 +171,7 @@ model. **CPU-tested**: implemented and covered by CPU contract tests only.
 | Dual-issue order and next-row prefetch in the direct-output R8 GEMV (`STRIX_TRELLIS_DIRECT_DUAL_ISSUE`, `STRIX_TRELLIS_DIRECT_PREFETCH`) | **Measured on GPU** | Outputs bit-identical to the previous kernels in all 50 fixture/row cells; see [Decode](#decode-gemv). Not yet used in a full model. |
 | Region upload (`strix_weights_prepare_parts`) | **In use** | Weight upload path of the engine loaders. |
 | Prepared plans (`strix_linear_plan_*`) | CPU-tested | Implemented in 0.2; no separate GPU qualification yet. |
-| Dense TP rank API (`strix_tp_dense_*`), dense R1 TP plans and grouped GEMV (`strix_tp_dense_plan_create_r1`, `strix_tp_dense_pair_plan_create_r1`, `strix_grouped_gemv_plan_*`) | **In use** (build option `STRIX_TRELLIS_ENABLE_EXPERIMENTAL_TP`) | Every attention projection (`q_a`‖`kv`, `q_b`, grouped `o_a`, `o_b`) of the DeepSeek V4.1 Flash engine runs through these plans. 40-layer bit-identical gate and A/B on hardware, 2026-10-24: greedy decode 34.7 → 30.6 ms/token, 6-token verify window 63.3 → 58.9 ms, 8 streams 85.4 → 83.6 ms/step. Exact-order split-K with S4 or LEGACY identities; grouped plans match `strix_gemv` R1 bits per row. The grouped K4 `o_a` (R1–R8) and K5 `o_a` (R1–R4) run an owner-fold kernel with the same bits as the split plan (GPU: outputs identical to the split plan and to row-wise `strix_gemv` at R1–R8, dispatch checked with a kernel trace). See [DENSE_R1.md](docs/DENSE_R1.md). |
+| Dense TP rank API (`strix_tp_dense_*`), dense R1 TP plans and grouped GEMV (`strix_tp_dense_plan_create_r1`, `strix_tp_dense_pair_plan_create_r1`, `strix_grouped_gemv_plan_*`) | **In use** (build option `STRIX_TRELLIS_ENABLE_EXPERIMENTAL_TP`) | Every attention projection (`q_a`‖`kv`, `q_b`, grouped `o_a`, `o_b`) of the DeepSeek V4.1 Flash engine runs through these plans. The attention integration and the later K4 owner-fold / staging changes have full-model gates; this does not qualify every RC6 policy in the engine. See [engine adoption](#rc6-defaults-and-engine-adoption). Exact-order split-K with S4 or LEGACY identities; grouped plans match `strix_gemv` R1 bits per row. The grouped K4 `o_a` (R1–R8) and K5 `o_a` (R1–R4) run an owner-fold kernel with the same bits as the split plan (GPU: outputs identical to the split plan and to row-wise `strix_gemv` at R1–R8, dispatch checked with a kernel trace). See [DENSE_R1.md](docs/DENSE_R1.md). |
 | K2 expert split plans, lean core, pipeline (`strix_tp_moe_plan_create_split`, `STRIX_TRELLIS_TP_MOE_PIPELINED_K2`) | **Measured on GPU** (build option `STRIX_TRELLIS_ENABLE_EXPERIMENTAL_TP`) | Bitwise equal to the 0.3 expert operator on GPU fixtures (24/24 cases, K2 and K2/K3) and to a lane-exact CPU reference; the pipeline with its measured configuration is on by default and was never slower than the non-pipelined operator in any measured cell. Not yet used in a full model (the engine's routed experts use another format). See [experimental-k2-lean.md](docs/experimental-k2-lean.md). |
 | MoE TP rank API (`strix_tp_moe_*`) | Measured on GPU | Through the K2 split plans above. See [TP_RANK.md](docs/TP_RANK.md). |
 | K2 R1 local-reduction kernel | CPU-tested | Off by default (`STRIX_TRELLIS_BUILD_EXPERIMENTAL_K2_LOCAL`). See [K2_LOCAL.md](docs/K2_LOCAL.md). |
@@ -163,20 +189,19 @@ Where a row existed in an earlier README, the V16 qualification build
 measured revision, and the previously published value is shown for
 comparison.
 
-- Measured on **2026-10-25** on this revision: the `q_b`, `o_b`, shared
-  down and output head rows of the decode table (alternating with V16 and
-  with the previous release), the grouped `o_a` table and the dense R1 plan
-  table (alternating with the previous release).
-- The other decode rows (`q_a`, `o_a` slice, shared w1, synthetic K2) and
-  the K2 expert table were measured on 2026-10-24 on `892b26e`. They run
-  kernels whose instructions are unchanged in this revision (checked by
-  comparing the compiled code), so those numbers are kept.
-- The prefill tables were measured on 2026-10-25 on the previous release,
-  whose WMMA cores are the same code as in this revision: previous core,
-  tiled core with the separate output transform, and tiled core with forced
-  fusion, alternating in the same session, one process per run. This
-  revision's default fuses on large grids; that effect was measured
-  separately (see [Prefill](#prefill-wmma-gemm)).
+- **RC5 (`5e86cb6`), 2026-10-25:** `q_b`, `o_b`, shared down and
+  output-head decode rows, and dense R1 plan table, alternating with RC4
+  (`62e0123`) and with V16 for the decode rows. RC6 retains these kernels.
+- **RC6 (`7a33c4b`), 2026-10-25:** grouped `o_a` table, six runs in two
+  blocks alternating with RC5 and a byte-identical RC5 control. K5 rows
+  1–4 select the new owner-fold kernel; other grouped kernels are unchanged.
+- **`892b26e`, 2026-10-24:** other decode rows (`q_a`, `o_a` slice,
+  shared w1, synthetic K2) and the K2 expert table; their compiled kernel
+  instructions are unchanged in RC6.
+- **RC4, 2026-10-25:** prefill tables, alternating the previous core, tiled
+  core with separate output transform, and tiled core with forced fusion,
+  one process per run. RC6 keeps those cores. RC5 introduced the default
+  auto-fusion policy, measured separately below.
 
 **Hardware and software:** AMD Ryzen AI Max+ 395, Radeon 8060S GPU
 (`gfx1151`, 40 CU, wave32), 128 GB unified memory (AMD lists 256 GB/s
@@ -252,7 +277,7 @@ the summed time of the measured prefill cells by a further 13–14 %.
 
 ### Decode (GEMV)
 
-| Tensor | K (bits) | Rows | Previous README (V16) µs | V16 build, same session µs | This revision µs | GB/s | % of read ceiling | % of call floor |
+| Tensor | K (bits) | Rows | Previous README (V16) µs | V16 build, same session µs | RC5 / RC6 µs | GB/s | % of read ceiling | % of call floor |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
 | EAQ `q_b` | 5 | 1 | 130.752 | 133.131 | 131.302 | 199.7 | 80.9 % | 85.1 % |
 | EAQ `q_b` | 5 | 8 | 150.422 | 155.197 | 142.458 | 184.0 | 74.6 % | 78.4 % |
@@ -274,13 +299,13 @@ the summed time of the measured prefill cells by a further 13–14 %.
 - The R8 rows of `q_b`, `o_b`, shared down and the output head use the
   direct-output kernels, which in this revision request the next K16 row
   before consuming the current one (`STRIX_TRELLIS_DIRECT_PREFETCH`, same
-  bits). Against the previous release in the same session (three
+  bits). Against RC4 in the same session (three
   repetitions, alternating): `q_b` R8 153.37 → 142.46 µs (−7.1 %), `o_b`
   R8 146.61 → 138.34 µs (−5.6 %), shared down R8 46.79 → 44.98 µs
   (−3.9 %), head R8 2436.5 → 2367.4 µs (−2.8 %). All four are now faster
   than the V16 build. R1 rows are unchanged within ±1 %.
 - In the same session, shared down rows 6, 32, 128 and 255 were slower than
-  the previous release in all three repetitions (+0.8 to +7 % median). All
+  RC4 in all three repetitions (+0.8 to +7 % median). All
   four rows run device code that is instruction-identical to the previous
   release (row 255 uses two K splits and is not fused); row 256, which uses
   one split and the fused prefill epilogue (see
@@ -295,7 +320,7 @@ the summed time of the measured prefill cells by a further 13–14 %.
 
 ### Prefill (WMMA GEMM)
 
-This revision makes a register-blocked WMMA core the default for codebook
+The register-blocked WMMA core is the default for codebook
 `mul1` at 4–6 bits and at least 128 rows (`STRIX_TRELLIS_WMMA_TILED=0`
 selects the previous core). It keeps the split count, the split bounds and
 the ascending K16 accumulation order of every output, so its outputs are
@@ -309,8 +334,8 @@ epilogue, same bits. By default it does so only when the grid has
 more blocks than HIP reports multiprocessors for the device (20 on gfx1151, where HIP counts WGPs: at least 21 blocks) (`STRIX_TRELLIS_WMMA_TILED_FUSED=auto`): with at most one block
 per WGP the epilogue's serial tail is exposed and fusing does not pay.
 `=0` keeps the separate output transform everywhere, `=1` fuses whenever
-possible. The tables below were measured with the separate transform on the
-previous release (same core code).
+possible. The tables below were measured with the separate transform on
+RC4 (same core code).
 
 **Method:** full operator (input H128 transform, WMMA core, output
 transform) through the internal entry point that `strix_gemm` uses, so
@@ -436,9 +461,8 @@ so it is compute-bound, not bandwidth-bound.
 
 `strix_tp_dense_plan_create_r1` with the LEGACY identity and the shipped
 schedule policy, on the per-rank DeepSeek V4.1 Flash shapes, against
-`strix_gemv` on the same weight copies. Measured on 2026-10-25 on this
-revision, alternating with the previous release in the same session (three
-runs each). Synthetic weights; cold rotation over at least 640 MiB of
+`strix_gemv` on the same weight copies. Measured on 2026-10-25 on RC5,
+alternating with RC4 in the same session (three runs each). Synthetic weights; cold rotation over at least 640 MiB of
 weight copies; one process per site and run, median of 11 sweeps per run,
 median of the three runs. Plan and `strix_gemv` outputs are equal bit for
 bit in every cell.
@@ -479,14 +503,14 @@ bit in every cell.
   read ceiling is the fixed cost of one launch. `q_b` (16,384 outputs)
   reaches 77.6 %.
 - The output head uses the same plan at 86.8 % of the read ceiling at R1.
-- Against the previous release in the same session the plans are faster in
+- Against RC4 in the same session the plans are faster in
   27 of 28 cells (up to 7 %; the staging loads of each 128-value block are
   now issued before the first FP32 boundary). The output head at R2 was
   slower in all three runs (median +0.6 %; the R2 row of the table is that
   measurement). That one cell (two rows in one block) now keeps the previous
-  staging order, with the same instructions as the previous release's
+  staging order, with the same instructions as RC4's
   kernel and the same bits: in a second session (two blocks of three paired
-  runs) it measured +0.11 % against the previous release (95 % interval
+  runs) it measured +0.11 % against RC4 (95 % interval
   −0.05 to +0.27 %), where the new order measured +0.88 %.
 - The `o_b` K-half (4096 → 5120, 4 splits) uses pipelined weight batches at
   rows 1–4: R1–R4 51.68 / 53.29 / 54.85 / 56.83 µs against 53.76 / 54.92 /
@@ -499,10 +523,10 @@ bit in every cell.
 owner-fold kernel (see [DENSE_R1.md](docs/DENSE_R1.md)) at every row
 count, K5 the owner-fold kernel at rows 1–4
 (`STRIX_TRELLIS_GROUP_K5_OWNER`) and the pipelined split schedule from row
-5 (`STRIX_TRELLIS_GROUP_K5_PIPELINE`). Measured on 2026-10-25 on this
-revision. Synthetic weights; cold rotation over 648 MiB (K4, 81 copies)
+5 (`STRIX_TRELLIS_GROUP_K5_PIPELINE`). Measured on 2026-10-25 on RC6.
+Synthetic weights; cold rotation over 648 MiB (K4, 81 copies)
 and 650 MiB (K5, 65 copies), 11 sweeps per run, median of six runs in two
-blocks, alternating with the previous release and a byte-identical copy
+blocks, alternating with RC5 and a byte-identical copy
 of it in the same session. "4 × `strix_gemv`" is the same four projections
 as four calls over the same rotation. GB/s, read ceiling and call floor as
 defined above. The grouped output equals row-by-row `strix_gemv` bit for
@@ -520,10 +544,10 @@ release's.
 | 5 | 6 | 59.42 | 120.75 | 2.03× | 176.5 | 71.5 % | 81.2 % |
 | 5 | 8 | 60.70 | 107.64 | 1.77× | 172.8 | 70.0 % | 79.5 % |
 
-- K5 against the previous release in the same session (median of six):
+- K5 against RC5 in the same session (median of six):
   R1 53.81 → 51.27 µs (−4.7 %), R2 54.93 → 51.52 µs (−6.2 %), R3 55.33 →
   54.40 µs, R4 55.83 → 54.59 µs; rows 5–8 and K4 run the same kernels as
-  the previous release and were within ±0.6 %. With the owner-fold kernel
+  RC5 and were within ±0.6 %. With the owner-fold kernel
   at every K5 row (an earlier session), rows 6–8 were 5–10 % slower than
   the split plan, so rows 5–8 keep it.
 - K4, owner-fold against the split plan in an earlier session (median of
@@ -601,7 +625,9 @@ read (gate/up and down of the experts selected by any row).
 
 Build with benchmarks enabled (see [Build with HIP](#build-with-hip) and add
 `-DSTRIX_TRELLIS_BUILD_BENCHMARKS=ON`), create fixtures, then run the API
-benchmark on an idle GPU:
+benchmark through the bounded queue wrapper described in
+[BUILD.md](docs/BUILD.md#gpu-turns). On shared machines, every GPU command
+below must enter through `tools/run_gpu_turn.sh`; do not run it directly:
 
 ```sh
 python3 tools/fetch_dense_fixtures.py --directory "$FIXTURES/ranges"   # byte ranges only, no full shards

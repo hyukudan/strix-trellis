@@ -115,6 +115,11 @@ inline bool dense_r1_pipelined(int input,int output,int bits,int rows,int splits
 // (R1/R6/R8 56.2/66.2/71.0 against 56.2/66.2/70.5): split plan kept. The o_b K-half (16 waves over 40 CTAs) loses.
 inline bool dense_r1_owner(int input,int output,int bits,int rows,int splits) {
     static const bool on = dense_r1_switch("STRIX_TRELLIS_DENSE_OWNER");
+#ifdef STRIX_TRELLIS_GROUP_K5_OWNER
+    // K5 wo_a S16 (Pass 4) with STRIX_TRELLIS_GROUP_K5_OWNER, rows 1-4 only: same chains and fold order as its S16
+    // split plan. Cold public-plan sweep: faster at R1-R4, slower from R6 on (32 owner CTAs whose LDS/VGPR grow with rows).
+    if (on && bits==5 && rows>=1 && rows<=4 && input==4096 && output==1024 && splits==16) return true;
+#endif
     return on && bits==4 && rows>=1 && rows<=8 && input==4096 && output==1024 && splits==32;
 }
 // Previous activation staging order (each slice's loads after the previous RN32 boundary; same values and bits) for

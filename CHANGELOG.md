@@ -8,6 +8,18 @@ session on the same machine.
 
 ## Unreleased — 2026-10-25
 
+- Grouped K5 `wo_a` GEMV (4096 -> 1024, S16) at rows 1-4 runs the
+  owner-fold kernel (partials folded by the CTA that owns each output
+  H128, in ascending split order from +0: the split plan's association,
+  so the bits are unchanged), `STRIX_TRELLIS_GROUP_K5_OWNER`, ON. Rows 5-8
+  keep the split plan: with all rows on the owner kernel, R6-R8 were
+  5-10 % slower (32 owner CTAs whose LDS and registers grow with the
+  rows). Confirmation turn (public grouped plan, cold 650 MiB rotation,
+  six repetitions in two blocks against the previous build and a
+  byte-identical copy of it): R1 53.74 -> 51.29 µs (-4.6 %, 79.1 -> 82.9 %
+  of the read ceiling), R2 54.89 -> 51.58 µs (-6.0 %), R3 -1.5 %, R4
+  -2.0 %; R5-R8 and K4 unchanged; outputs bit-identical, dispatch
+  verified by kernel traces. OFF keeps the split plan at every row.
 - Direct-output R8 GEMV (`q_b`, `o_b`, shared down and output head): the
   packed words of the next K16 row are requested before the current row
   is consumed (`STRIX_TRELLIS_DIRECT_PREFETCH`, ON). `SaddrLane` gains a

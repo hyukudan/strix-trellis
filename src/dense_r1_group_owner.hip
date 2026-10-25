@@ -7,8 +7,8 @@
 // the same order, lane reduction by shuffles 2 then 1) and writes the split partial to LDS; the waves owning the rows
 // add the pass's partials to their register fold in ascending split order from +0. The association is the S-split
 // plan's finish(), and so is the epilogue (H128, svh, bias, alpha, beta): bits equal to the dense-r1 plan.
-// Instantiated for wo_a 4096 -> 1024 S32 (Pass 8), q_b 1280 -> 16384 S4 (Pass 4) and the o_b K-half 4096 -> 5120 S4
-// (Pass 2).
+// Instantiated for wo_a 4096 -> 1024 S32 (Pass 8) and S16 (Pass 4: the same 32 K16 tiles per wave and pass, half the
+// LDS of Pass 8), q_b 1280 -> 16384 S4 (Pass 4) and the o_b K-half 4096 -> 5120 S4 (Pass 2).
 namespace strix_trellis::dense_r1 {
 namespace {
 constexpr int OwnerWaves = 16;
@@ -199,6 +199,9 @@ const void* owner_function(const DenseR1Launch& a) {
     const auto& w = a.projection.weights;
     if (a.projection.rows != a.projection.rows_per_block || w.output % 128) return nullptr;
     if (w.input == 4096 && w.output == 1024 && a.splits == 32) return owner_bits<4096, 32, 8>(w.bits, a.projection.rows);
+#ifdef STRIX_TRELLIS_GROUP_K5_OWNER
+    if (w.input == 4096 && w.output == 1024 && a.splits == 16) return owner_bits<4096, 16, 4>(w.bits, a.projection.rows);
+#endif
     if (w.input == 1280 && w.output == 16384 && a.splits == 4) return owner_bits<1280, 4, 4>(w.bits, a.projection.rows);
     if (w.input == 4096 && w.output == 5120 && a.splits == 4) return owner_bits<4096, 4, 2>(w.bits, a.projection.rows);
     return nullptr;

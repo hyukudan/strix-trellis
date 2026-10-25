@@ -145,7 +145,7 @@ model. **CPU-tested**: implemented and covered by CPU contract tests only.
 | Dual-issue order and next-row prefetch in the direct-output R8 GEMV (`STRIX_TRELLIS_DIRECT_DUAL_ISSUE`, `STRIX_TRELLIS_DIRECT_PREFETCH`) | **Measured on GPU** | Outputs bit-identical to the previous kernels in all 50 fixture/row cells; see [Decode](#decode-gemv). Not yet used in a full model. |
 | Region upload (`strix_weights_prepare_parts`) | **In use** | Weight upload path of the engine loaders. |
 | Prepared plans (`strix_linear_plan_*`) | CPU-tested | Implemented in 0.2; no separate GPU qualification yet. |
-| Dense TP rank API (`strix_tp_dense_*`), dense R1 TP plans and grouped GEMV (`strix_tp_dense_plan_create_r1`, `strix_tp_dense_pair_plan_create_r1`, `strix_grouped_gemv_plan_*`) | **In use** (build option `STRIX_TRELLIS_ENABLE_EXPERIMENTAL_TP`) | Every attention projection (`q_a`‖`kv`, `q_b`, grouped `o_a`, `o_b`) of the DeepSeek V4.1 Flash engine runs through these plans. 40-layer bit-identical gate and A/B on hardware, 2026-10-24: greedy decode 34.7 → 30.6 ms/token, 6-token verify window 63.3 → 58.9 ms, 8 streams 85.4 → 83.6 ms/step. Exact-order split-K with S4 or LEGACY identities; grouped plans match `strix_gemv` R1 bits per row. The grouped K4 `o_a` now runs an owner-fold kernel with the same bits as the split plan (GPU: outputs identical to the split plan and to row-wise `strix_gemv` at R1–R8, dispatch checked with a kernel trace). See [DENSE_R1.md](docs/DENSE_R1.md). |
+| Dense TP rank API (`strix_tp_dense_*`), dense R1 TP plans and grouped GEMV (`strix_tp_dense_plan_create_r1`, `strix_tp_dense_pair_plan_create_r1`, `strix_grouped_gemv_plan_*`) | **In use** (build option `STRIX_TRELLIS_ENABLE_EXPERIMENTAL_TP`) | Every attention projection (`q_a`‖`kv`, `q_b`, grouped `o_a`, `o_b`) of the DeepSeek V4.1 Flash engine runs through these plans. 40-layer bit-identical gate and A/B on hardware, 2026-10-24: greedy decode 34.7 → 30.6 ms/token, 6-token verify window 63.3 → 58.9 ms, 8 streams 85.4 → 83.6 ms/step. Exact-order split-K with S4 or LEGACY identities; grouped plans match `strix_gemv` R1 bits per row. The grouped K4 `o_a` (R1–R8) and K5 `o_a` (R1–R4) run an owner-fold kernel with the same bits as the split plan (GPU: outputs identical to the split plan and to row-wise `strix_gemv` at R1–R8, dispatch checked with a kernel trace). See [DENSE_R1.md](docs/DENSE_R1.md). |
 | K2 expert split plans, lean core, pipeline (`strix_tp_moe_plan_create_split`, `STRIX_TRELLIS_TP_MOE_PIPELINED_K2`) | **Measured on GPU** (build option `STRIX_TRELLIS_ENABLE_EXPERIMENTAL_TP`) | Bitwise equal to the 0.3 expert operator on GPU fixtures (24/24 cases, K2 and K2/K3) and to a lane-exact CPU reference; the pipeline with its measured configuration is on by default and was never slower than the non-pipelined operator in any measured cell. Not yet used in a full model (the engine's routed experts use another format). See [experimental-k2-lean.md](docs/experimental-k2-lean.md). |
 | MoE TP rank API (`strix_tp_moe_*`) | Measured on GPU | Through the K2 split plans above. See [TP_RANK.md](docs/TP_RANK.md). |
 | K2 R1 local-reduction kernel | CPU-tested | Off by default (`STRIX_TRELLIS_BUILD_EXPERIMENTAL_K2_LOCAL`). See [K2_LOCAL.md](docs/K2_LOCAL.md). |
@@ -496,29 +496,37 @@ bit in every cell.
 
 `strix_grouped_gemv_plan_*` runs the four `o_a` groups of one rank
 (4 × `(4096, 1024)`) in one launch with the shipped policy: K4 uses the
-owner-fold kernel (see [DENSE_R1.md](docs/DENSE_R1.md)), K5 the pipelined
-split schedule (`STRIX_TRELLIS_GROUP_K5_PIPELINE`). Measured on 2026-10-25
-on this revision. Synthetic weights; cold rotation over 648 MiB (K4, 81
-copies) and 650 MiB (K5, 65 copies), 11 sweeps per run, median of three
-runs; the default and the split plan (`STRIX_TRELLIS_DENSE_OWNER=0`)
-alternated in the same session. "4 × `strix_gemv`" is the same four
-projections as four calls over the same rotation. GB/s, read ceiling and
-call floor as defined above. The grouped output equals row-by-row
-`strix_gemv` bit for bit in every cell, and the owner-fold and split
-outputs are identical.
+owner-fold kernel (see [DENSE_R1.md](docs/DENSE_R1.md)) at every row
+count, K5 the owner-fold kernel at rows 1–4
+(`STRIX_TRELLIS_GROUP_K5_OWNER`) and the pipelined split schedule from row
+5 (`STRIX_TRELLIS_GROUP_K5_PIPELINE`). Measured on 2026-10-25 on this
+revision. Synthetic weights; cold rotation over 648 MiB (K4, 81 copies)
+and 650 MiB (K5, 65 copies), 11 sweeps per run, median of six runs in two
+blocks, alternating with the previous release and a byte-identical copy
+of it in the same session. "4 × `strix_gemv`" is the same four projections
+as four calls over the same rotation. GB/s, read ceiling and call floor as
+defined above. The grouped output equals row-by-row `strix_gemv` bit for
+bit in every cell, and the outputs are identical to the previous
+release's.
 
 | K (bits) | Rows | Grouped plan µs | 4 × `strix_gemv` µs | Speed-up | GB/s | % of read ceiling | % of call floor |
 |---:|---:|---:|---:|---:|---:|---:|---:|
-| 4 | 1 | 44.52 | 107.13 | 2.41× | 188.4 | 76.4 % | 89.5 % |
-| 4 | 2 | 44.86 | 112.29 | 2.50× | 187.0 | 75.8 % | 88.8 % |
-| 4 | 6 | 58.92 | 143.12 | 2.43× | 142.4 | 57.7 % | 67.6 % |
-| 4 | 8 | 67.61 | 150.59 | 2.23× | 124.1 | 50.3 % | 58.9 % |
-| 5 | 1 | 53.85 | 90.19 | 1.67× | 194.7 | 78.9 % | 89.7 % |
-| 5 | 2 | 55.37 | 109.17 | 1.97× | 189.4 | 76.8 % | 87.2 % |
-| 5 | 6 | 62.43 | 120.82 | 1.94× | 168.0 | 68.1 % | 77.3 % |
-| 5 | 8 | 64.59 | 107.85 | 1.67× | 162.3 | 65.8 % | 74.8 % |
+| 4 | 1 | 43.70 | 106.94 | 2.45× | 192.0 | 77.8 % | 91.1 % |
+| 4 | 2 | 44.67 | 111.97 | 2.51× | 187.8 | 76.1 % | 89.1 % |
+| 4 | 6 | 60.46 | 143.00 | 2.37× | 138.7 | 56.2 % | 65.9 % |
+| 4 | 8 | 65.20 | 150.57 | 2.31× | 128.6 | 52.1 % | 61.1 % |
+| 5 | 1 | 51.27 | 90.01 | 1.76× | 204.5 | 82.9 % | 94.2 % |
+| 5 | 2 | 51.52 | 108.94 | 2.11× | 203.5 | 82.5 % | 93.7 % |
+| 5 | 6 | 59.42 | 120.75 | 2.03× | 176.5 | 71.5 % | 81.2 % |
+| 5 | 8 | 60.70 | 107.64 | 1.77× | 172.8 | 70.0 % | 79.5 % |
 
-- K4, owner-fold against the split plan in the same session (median of
+- K5 against the previous release in the same session (median of six):
+  R1 53.81 → 51.27 µs (−4.7 %), R2 54.93 → 51.52 µs (−6.2 %), R3 55.33 →
+  54.40 µs, R4 55.83 → 54.59 µs; rows 5–8 and K4 run the same kernels as
+  the previous release and were within ±0.6 %. With the owner-fold kernel
+  at every K5 row (an earlier session), rows 6–8 were 5–10 % slower than
+  the split plan, so rows 5–8 keep it.
+- K4, owner-fold against the split plan in an earlier session (median of
   three paired runs): R1 44.52 / 46.48 µs, R2 44.86 / 47.96, R6 58.92 /
   62.08, R8 67.61 / 68.83; faster at every row count from 1 to 8. A
   measurement of the split plan in an earlier session gave R8 63.96 µs;
@@ -683,7 +691,8 @@ header-only interface target. GPU programs are not registered with CTest.
 | `STRIX_TRELLIS_ENABLE_EXPERIMENTAL_TP` | OFF | Build the TP dense / MoE rank APIs and their probe. |
 | `STRIX_TRELLIS_DIRECT_DUAL_ISSUE` | ON | Direct-output R8 GEMV: dot products ordered for dual issue (same bits). OFF keeps the previous order. |
 | `STRIX_TRELLIS_DIRECT_PREFETCH` | ON | Direct-output R8 GEMV: request the next K16 row before consuming the current one (same bits). |
-| `STRIX_TRELLIS_GROUP_K5_PIPELINE` | ON | Grouped K5 `wo_a` GEMV: pipelined 128-column schedule of the K4 path (same bits). OFF restores {64,2,16}. |
+| `STRIX_TRELLIS_GROUP_K5_PIPELINE` | ON | Grouped K5 `wo_a` GEMV: pipelined 128-column schedule of the K4 path (same bits). OFF restores {64,2,16} where the split plan runs (it does not disable the owner-fold kernel). |
+| `STRIX_TRELLIS_GROUP_K5_OWNER` | ON | Grouped K5 `wo_a` GEMV, rows 1–4: owner-fold kernel (same bits; see [DENSE_R1.md](docs/DENSE_R1.md)). OFF keeps the split plan at every row. |
 | `STRIX_TRELLIS_PLAN_FUSED_COMPLETION` | OFF | Prepared R1 plans of the fused-input shapes fold the output transform into the core launch (same bits; see [API.md](docs/API.md)). |
 
 More detail: [BUILD.md](docs/BUILD.md), [GPU_TESTS.md](docs/GPU_TESTS.md).

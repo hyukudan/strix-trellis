@@ -20,6 +20,11 @@ session on the same machine.
   of the read ceiling), R2 54.89 -> 51.58 µs (-6.0 %), R3 -1.5 %, R4
   -2.0 %; R5-R8 and K4 unchanged; outputs bit-identical, dispatch
   verified by kernel traces. OFF keeps the split plan at every row.
+  Repeated on this release against the previous one (same protocol):
+  R1 53.81 -> 51.27 µs (-4.7 %), R2 54.93 -> 51.52 µs (-6.2 %), R3
+  -1.7 %, R4 -2.2 %; R5-R8 and K4 (unchanged kernels) within ±0.6 %;
+  outputs identical. README grouped `o_a` table measured again in that
+  session.
 - Direct-output R8 GEMV (`q_b`, `o_b`, shared down and output head): the
   packed words of the next K16 row are requested before the current row
   is consumed (`STRIX_TRELLIS_DIRECT_PREFETCH`, ON). `SaddrLane` gains a

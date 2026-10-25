@@ -407,16 +407,28 @@ int tuneg(int bits, const std::vector<int>& row_list) {
         };
         const auto before = run0();
         const double t = timed(rt, [&](int c) { api_ok(strix_grouped_gemv_plan_submit(plans[size_t(c)])); }, copies, 64);
+        // Baseline: the same four projections as four strix_gemv calls over the same rotation. strix_gemv takes
+        // contiguous rows, so each group's rows are copied into their own [rows][I] block; outputs go to their own buffer.
+        std::vector<float> hxc(size_t(G) * rows * I);
+        for (int g = 0; g < G; ++g)
+            for (int r = 0; r < rows; ++r)
+                std::memcpy(hxc.data() + (size_t(g) * rows + r) * I, hx.data() + size_t(r) * xrs + size_t(g) * I, size_t(I) * 4);
+        Buffer xc(hxc.size() * 4), ybase(size_t(G) * rows * N * 4);
+        xc.upload(hxc.data(), xc.bytes);
+        const double t_gemv = timed(rt, [&](int c) {
+            for (int g = 0; g < G; ++g)
+                gemv(rt, ws[size_t(c * G + g)]->handle, xc.f() + size_t(g) * rows * I, I, ybase.f() + size_t(g) * rows * N, rows, gws.data, gb);
+        }, copies, 64);
         const auto after = run0();
         const bool exact = before == expect && after == expect;
         if (!exact) ++failures;
         uint64_t h = 1469598103934665603ull;
         for (unsigned char b : after) h = (h ^ b) * 1099511628211ull;
         const auto pol = dense_r1_group_schedule(I, N, bits, rows, dense_r1_group_splits(I, N, bits));
-        std::printf("GPLAN bits=%d rows=%d copies=%d sched={%d,%d,%d,%s} us=%.2f GBps=%.1f %s output_fnv=%llx\n", bits, rows, copies,
+        std::printf("GPLAN bits=%d rows=%d copies=%d sched={%d,%d,%d,%s} us=%.2f GBps=%.1f %s output_fnv=%llx gemv4_us=%.2f\n", bits, rows, copies,
                     pol.columns, pol.prefetch, pol.outputs_per_wave,
                     dense_r1_group_pipelined(I, N, bits, rows, dense_r1_group_splits(I, N, bits)) ? "pipe" : "nopipe", t,
-                    double(group_bytes) / (t * 1e3), exact ? "EXACT" : "DIFF", (unsigned long long)h);
+                    double(group_bytes) / (t * 1e3), exact ? "EXACT" : "DIFF", (unsigned long long)h, t_gemv);
         for (auto p : plans) api_ok(strix_grouped_gemv_plan_destroy(p));
         std::fflush(stdout);
     }

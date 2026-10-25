@@ -454,19 +454,27 @@ bit in every cell.
 ### Grouped GEMV: `o_a` (decode, one rank)
 
 `strix_grouped_gemv_plan_*` runs the four `o_a` groups of one rank
-(4 × `(4096, 1024)`) in one launch. Synthetic weights; 640 MB rotation; the
-grouped output equals four `strix_gemv` calls bit for bit in every cell.
+(4 × `(4096, 1024)`) in one launch, with the shipped schedule policy (K5
+uses the pipelined schedule, `STRIX_TRELLIS_GROUP_K5_PIPELINE`). Measured
+on 2026-10-25 on revision `36ce432` (the changes since `892b26e` that affect
+this table are that K5 schedule and the benchmark's baseline column), with no
+previous-build comparison in the same session. Synthetic weights; cold
+rotation over 648 MiB (K4, 81 copies) and 650 MiB (K5, 65 copies) of
+weights, 11 sweeps, median of three runs alternating the K order. "4 ×
+`strix_gemv`" is the same four projections as four calls over the same
+rotation. GB/s, read ceiling and call floor as defined above. The grouped
+output equals row-by-row `strix_gemv` bit for bit in every cell.
 
 | K (bits) | Rows | Grouped plan µs | 4 × `strix_gemv` µs | Speed-up | GB/s | % of read ceiling | % of call floor |
 |---:|---:|---:|---:|---:|---:|---:|---:|
-| 4 | 1 | 52.14 | 107.06 | 2.05× | 160.9 | 65.2 % | 76.3 % |
-| 4 | 2 | 55.21 | 112.11 | 2.03× | 151.9 | 61.6 % | 72.1 % |
-| 4 | 6 | 68.15 | 143.19 | 2.10× | 123.1 | 49.9 % | 58.4 % |
-| 4 | 8 | 73.93 | 150.07 | 2.03× | 113.5 | 46.0 % | 53.8 % |
-| 5 | 1 | 58.55 | 90.18 | 1.54× | 179.1 | 72.6 % | 82.4 % |
-| 5 | 2 | 60.41 | 109.03 | 1.80× | 173.6 | 70.4 % | 79.9 % |
-| 5 | 6 | 77.53 | 120.59 | 1.56× | 135.2 | 54.8 % | 62.2 % |
-| 5 | 8 | 84.57 | 107.73 | 1.27× | 124.0 | 50.3 % | 57.0 % |
+| 4 | 1 | 51.21 | 107.02 | 2.09× | 163.8 | 66.4 % | 77.8 % |
+| 4 | 2 | 52.96 | 112.12 | 2.12× | 158.4 | 64.2 % | 75.2 % |
+| 4 | 6 | 60.71 | 143.15 | 2.36× | 138.2 | 56.0 % | 65.6 % |
+| 4 | 8 | 63.96 | 150.69 | 2.36× | 131.2 | 53.2 % | 62.3 % |
+| 5 | 1 | 54.49 | 90.02 | 1.65× | 192.4 | 78.0 % | 88.6 % |
+| 5 | 2 | 56.56 | 109.09 | 1.93× | 185.4 | 75.1 % | 85.4 % |
+| 5 | 6 | 63.55 | 121.05 | 1.90× | 165.0 | 66.9 % | 76.0 % |
+| 5 | 8 | 66.47 | 107.79 | 1.62× | 157.8 | 63.9 % | 72.6 % |
 
 ### Experimental: K2 expert block (decode, one rank)
 

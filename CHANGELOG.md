@@ -55,6 +55,11 @@ session on the same machine.
   remains OFF. Completion counters
   belong to the weights handle; plan creation zeroes them and synchronizes.
 - README: EAQ `q_a` is K6 (was labelled K5).
+- README: grouped `o_a` table re-measured with the K5 pipelined schedule
+  (K5 R8 84.57 -> 66.47 µs, 50.3 -> 63.9 % of the read ceiling); the
+  rotation is stated as measured (648 MiB K4, 650 MiB K5).
+  `dense_r1_group_probe tuneg` also times the four projections as four
+  `strix_gemv` calls over the same rotation (`gemv4_us`).
 - Prefill: register-blocked WMMA GEMM core, default for codebook `mul1` at
   4–6 bits and at least 128 rows (`STRIX_TRELLIS_WMMA_TILED=0` selects the
   previous core; fewer rows, other codebooks and other bit rates keep it).

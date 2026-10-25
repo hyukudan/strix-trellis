@@ -29,6 +29,25 @@ template<int Bits,bool FastWrap=true> struct SaddrLane {
         high=(a<<shift)|(b>>(32-shift));
         low=(b<<shift)|(c>>(32-shift));tail=c<<shift;
     }
+    // Two-phase form of the constructor: issue() requests the same three words, the Raw
+    // constructor forms the same window when they are consumed. The one-phase constructor
+    // waits for its loads at once (in-order vmcnt), so only this form overlaps latency.
+    struct Raw { uint32_t a=0,b=0,c=0; };
+    __device__ __forceinline__ static Raw issue(const uint32_t* data) {
+        constexpr int count=Bits*8;
+        auto* base=reinterpret_cast<const unsigned char*>(data);
+        int start=((threadIdx.x&31)*8+1)*Bits+256*Bits-16;
+        int index=start/32-count;
+        int ia=index<0?index+count:index;
+        int ib=index+1>=count?index+1-count:index+1;
+        int ic=index+2>=count?index+2-count:index+2;
+        return Raw{load(base,ia),load(base,ib),load(base,ic)};
+    }
+    __device__ explicit SaddrLane(const Raw& r) {
+        int shift=(((threadIdx.x&31)*8+1)*Bits+256*Bits-16)&31;
+        high=(r.a<<shift)|(r.b>>(32-shift));
+        low=(r.b<<shift)|(r.c>>(32-shift));tail=r.c<<shift;
+    }
     template<int J> __device__ __forceinline__ uint32_t state() const {
         constexpr int offset=J*Bits;
         if constexpr(offset<=16)return(high>>(16-offset))&65535u;

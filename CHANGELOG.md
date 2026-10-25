@@ -8,6 +8,22 @@ session on the same machine.
 
 ## Unreleased — 2026-10-24
 
+- Direct-output R8 GEMV (`q_b`, `o_b`, shared down and output head): the
+  packed words of the next K16 row are requested before the current row
+  is consumed (`STRIX_TRELLIS_DIRECT_PREFETCH`, ON). `SaddrLane` gains a
+  two-phase form, `issue()` plus a constructor from the raw words, so the
+  loads overlap the current row's decode and dot products instead of
+  being waited for at once. Same addresses and the same dot product order;
+  outputs bit-identical in every measured cell. Confirmation turn (six
+  repetitions in two blocks against the previous build and a
+  byte-identical copy of it, cold rotation, 50 cells over all fixture
+  rows): EAQ `q_b` R8 152.47 -> 143.40 µs (-5.9 %), `o_b` R8 -4.5 %,
+  shared down R8 -3.9 %, output head R8 -4.1 %; every target check
+  passed and no cell met the regression condition in both blocks (the
+  turn was noisy: single-block excursions up to +2.8 % also appeared
+  between the two identical builds). An earlier turn of the same build
+  measured `q_b` R8 151.28 -> 138.21 µs (-8.6 %) and was inconclusive
+  under a stricter per-block rule. OFF keeps the previous load order.
 - Grouped K5 `wo_a` GEMV (4096 -> 1024, rows 1-8) uses the pipelined
   {128,4,16} schedule of the K4 path by default
   (`STRIX_TRELLIS_GROUP_K5_PIPELINE`, ON). Cold public-plan confirmation,

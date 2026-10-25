@@ -23,6 +23,12 @@ __global__ __launch_bounds__(1024) void g4(const uint32_t* __restrict__ packed,
     const int tile=__builtin_amdgcn_readfirstlane(int(blockIdx.x)*8+nw);
     const int length=(input/16)/4, end=(g+1)*length;
     float acc[8][2]={};
+#ifdef STRIX_TRELLIS_DIRECT_PREFETCH
+    // Prefetch: the packed words of the next K16 row are requested before the current row is
+    // consumed (the first one before the first activation staging); the window is formed at
+    // use. Same addresses, same order of every dot product; only the load issue point moves.
+    auto next=packed_decode::SaddrLane<Bits>::issue(packed+(size_t(g*length)*(output/16)+tile)*Bits*8);
+#endif
     for(int base=g*length;base<end;base+=8) {
         #pragma unroll
         for(int pass=0;pass<2;++pass) {
@@ -39,7 +45,14 @@ __global__ __launch_bounds__(1024) void g4(const uint32_t* __restrict__ packed,
         const size_t row_words=size_t(output/16)*Bits*8;
         const uint32_t* row=packed+(size_t(base)*(output/16)+tile)*Bits*8;
         for(int kk=0;kk<8 && base+kk<end;++kk,row+=row_words) {
+#ifdef STRIX_TRELLIS_DIRECT_PREFETCH
+            const packed_decode::SaddrLane<Bits> reader(next);
+            if(base+kk+1<end) next=packed_decode::SaddrLane<Bits>::issue(row+row_words);
+            // Keep the next row's loads at the top of this step.
+            __builtin_amdgcn_sched_barrier(0);
+#else
             packed_decode::SaddrLane<Bits> reader(row);
+#endif
             Pair av[8][2];
             #pragma unroll
             for(int r=0;r<8;++r) {

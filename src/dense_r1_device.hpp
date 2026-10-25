@@ -71,7 +71,7 @@ __device__ __forceinline__ void finish(const DenseR1Launch& a, int ob, int first
 // One CTA of one projection: (split, nt, row_block) is the CTA's logical
 // coordinate. The single and grouped kernels below differ only in how they
 // select the launch member and that coordinate.
-template<int Input, int Splits, int Bits, int Rows, int Columns, int U, bool HalfWave, bool Pipe = false>
+template<int Input, int Splits, int Bits, int Rows, int Columns, int U, bool HalfWave, bool Pipe = false, bool LateStage = false>
 __device__ __forceinline__ void projection_body(const DenseR1Launch& a, Storage<Input, Splits, Rows>& shared,
                                                 int split, int nt, int row_block) {
     constexpr bool N8 = HalfWave || Columns == 8;
@@ -122,16 +122,27 @@ __device__ __forceinline__ void projection_body(const DenseR1Launch& a, Storage<
     for (int job = wave; job < Rows * nh; job += Waves) {
         const int r = job / nh;
         const int h = job % nh;
-        float v[4], x[4], s[4];
-        #pragma unroll
-        for (int j = 0; j < 4; ++j) {
-            const int col = (first_h + h) * 128 + lane + 32*j;
-            x[j] = (Rows==8 || first + r < d.rows) ? d.x[size_t(first + r) * d.x_row_stride + col] : 0;
-            s[j] = __half2float(__ushort_as_half(w.suh[col]));
+        float v[4];
+        if constexpr (LateStage) {
+            // previous order: each slice's loads follow the previous RN32 boundary (kept where it measured faster)
+            #pragma unroll
+            for (int j = 0; j < 4; ++j) {
+                const int col = (first_h + h) * 128 + lane + 32*j;
+                const float x = (Rows==8 || first + r < d.rows) ? d.x[size_t(first + r) * d.x_row_stride + col] : 0;
+                v[j] = float(_Float16(materialize_fp32(x * __half2float(__ushort_as_half(w.suh[col])))));
+            }
+        } else {
+            float x[4], s[4];
+            #pragma unroll
+            for (int j = 0; j < 4; ++j) {
+                const int col = (first_h + h) * 128 + lane + 32*j;
+                x[j] = (Rows==8 || first + r < d.rows) ? d.x[size_t(first + r) * d.x_row_stride + col] : 0;
+                s[j] = __half2float(__ushort_as_half(w.suh[col]));
+            }
+            // all loads in flight before the first RN32 boundary (an asm volatile that orders them)
+            #pragma unroll
+            for (int j = 0; j < 4; ++j) v[j] = float(_Float16(materialize_fp32(x[j] * s[j])));
         }
-        // all loads in flight before the first RN32 boundary (an asm volatile that orders them)
-        #pragma unroll
-        for (int j = 0; j < 4; ++j) v[j] = float(_Float16(materialize_fp32(x[j] * s[j])));
         hadamard128(v);
         #pragma unroll
         for (int j = 0; j < 4; ++j) {
@@ -267,7 +278,7 @@ __device__ __forceinline__ void projection_body(const DenseR1Launch& a, Storage<
     if (!threadIdx.x) __hip_atomic_store(a.counters+ci, 0u, __ATOMIC_RELEASE, __HIP_MEMORY_SCOPE_AGENT);
 }
 
-template<int Input, int Splits, int Bits, int Rows, int Columns, int U, bool HalfWave, bool Pipe = false>
+template<int Input, int Splits, int Bits, int Rows, int Columns, int U, bool HalfWave, bool Pipe = false, bool LateStage = false>
 __global__ __launch_bounds__((HalfWave || Columns == 8) ? Columns * 4 : Columns * 2) void projection(DenseR1Launch a) {
     __shared__ Storage<Input, Splits, Rows> shared;
     int split = int(blockIdx.y),nt = int(blockIdx.x);
@@ -276,7 +287,7 @@ __global__ __launch_bounds__((HalfWave || Columns == 8) ? Columns * 4 : Columns 
         const unsigned physical=(blockIdx.y*gridDim.x+blockIdx.x+a.schedule_rotation)%count;
         split=int(physical/gridDim.x);nt=int(physical%gridDim.x);
     }
-    projection_body<Input,Splits,Bits,Rows,Columns,U,HalfWave,Pipe>(a, shared, split, nt, Rows==8?0:int(blockIdx.z));
+    projection_body<Input,Splits,Bits,Rows,Columns,U,HalfWave,Pipe,LateStage>(a, shared, split, nt, Rows==8?0:int(blockIdx.z));
 }
 
 // Independent projections of one geometry in one dispatch: blockIdx.z selects
@@ -297,7 +308,7 @@ __global__ __launch_bounds__((HalfWave || Columns == 8) ? Columns * 4 : Columns 
 }
 
 template<int Input, int Splits, int Rows, int Columns, int U, bool HalfWave, bool Grouped>
-const void* bits(int b, bool pipe) {
+const void* bits(int b, bool pipe, bool late) {
     if constexpr (Grouped) {
         if (pipe) {
             if (b == 4) return reinterpret_cast<const void*>(grouped<Input,Splits,4,Rows,Columns,U,HalfWave,true>);
@@ -307,6 +318,12 @@ const void* bits(int b, bool pipe) {
         if (b == 4) return reinterpret_cast<const void*>(grouped<Input,Splits,4,Rows,Columns,U,HalfWave,false>);
         if (b == 5) return reinterpret_cast<const void*>(grouped<Input,Splits,5,Rows,Columns,U,HalfWave,false>);
     } else {
+        if (late) {  // previous staging order: only the measured cell (dense_r1_late_staging), single plans
+            if constexpr (Input == 5120 && Splits == 4 && Rows == 2 && Columns == 64 && U == 4 && HalfWave) {
+                if (b == 5 && !pipe) return reinterpret_cast<const void*>(projection<Input,Splits,5,Rows,Columns,U,HalfWave,false,true>);
+            }
+            return nullptr;
+        }
         if (pipe) {  // pipelined weight batches for the single plans: the 64/128-column 16-output bodies only
             if constexpr (Columns >= 64 && !HalfWave) {
                 if (b == 4) return reinterpret_cast<const void*>(projection<Input,Splits,4,Rows,Columns,U,HalfWave,true>);
@@ -320,24 +337,24 @@ const void* bits(int b, bool pipe) {
     return nullptr;
 }
 template<int Input, int Splits, int Rows, int U, bool Grouped>
-const void* columns(int c, int b, int outputs, bool pipe) {
-    if (c == 8) return bits<Input,Splits,Rows,8,U,true,Grouped>(b, pipe);
-    #define COL(C) if(c==C) return outputs==8 ? bits<Input,Splits,Rows,C,U,true,Grouped>(b, pipe) : bits<Input,Splits,Rows,C,U,false,Grouped>(b, pipe)
+const void* columns(int c, int b, int outputs, bool pipe, bool late) {
+    if (c == 8) return bits<Input,Splits,Rows,8,U,true,Grouped>(b, pipe, late);
+    #define COL(C) if(c==C) return outputs==8 ? bits<Input,Splits,Rows,C,U,true,Grouped>(b, pipe, late) : bits<Input,Splits,Rows,C,U,false,Grouped>(b, pipe, late)
     COL(16); COL(32); COL(64); COL(128);
     #undef COL
     return nullptr;
 }
 template<int Input, int Splits, int Rows, bool Grouped>
-const void* prefetch(int u, int c, int b, int outputs, bool pipe) {
+const void* prefetch(int u, int c, int b, int outputs, bool pipe, bool late) {
     if(outputs!=8 && outputs!=16)return nullptr;
-    if (u == 1) return columns<Input,Splits,Rows,1,Grouped>(c,b,outputs,pipe);
-    if (u == 2) return columns<Input,Splits,Rows,2,Grouped>(c,b,outputs,pipe);
-    if (u == 4) return columns<Input,Splits,Rows,4,Grouped>(c,b,outputs,pipe);
+    if (u == 1) return columns<Input,Splits,Rows,1,Grouped>(c,b,outputs,pipe,late);
+    if (u == 2) return columns<Input,Splits,Rows,2,Grouped>(c,b,outputs,pipe,late);
+    if (u == 4) return columns<Input,Splits,Rows,4,Grouped>(c,b,outputs,pipe,late);
     return nullptr;
 }
 template<int Input, int Splits, bool Grouped = false>
 const void* rows(const DenseR1Launch& a) {
-    #define ROW(R) case R: return prefetch<Input,Splits,R,Grouped>(a.prefetch,a.columns_per_block,a.projection.weights.bits,a.outputs_per_wave,a.pipelined)
+    #define ROW(R) case R: return prefetch<Input,Splits,R,Grouped>(a.prefetch,a.columns_per_block,a.projection.weights.bits,a.outputs_per_wave,a.pipelined,!Grouped && a.late_stage)
     switch (a.projection.rows_per_block) { ROW(1); ROW(2); ROW(3); ROW(4); ROW(5); ROW(6); ROW(7); ROW(8); default: return nullptr; }
     #undef ROW
 }

@@ -117,4 +117,10 @@ inline bool dense_r1_owner(int input,int output,int bits,int rows,int splits) {
     static const bool on = dense_r1_switch("STRIX_TRELLIS_DENSE_OWNER");
     return on && bits==4 && rows>=1 && rows<=8 && input==4096 && output==1024 && splits==32;
 }
+// Previous activation staging order (each slice's loads after the previous RN32 boundary; same values and bits) for
+// the K5 output head at two rows in one block ({64,4,8} schedule): measured in the same session, two blocks of three
+// paired runs, the early staging was 0.9 % slower there and faster or even at every other measured cell.
+inline bool dense_r1_late_staging(int input,int output,int bits,int rows,int rows_per_block,int splits) {
+    return input==5120 && output==64640 && bits==5 && rows==2 && rows_per_block==2 && splits==4;
+}
 } // namespace strix_trellis

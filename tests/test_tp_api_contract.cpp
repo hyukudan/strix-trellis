@@ -864,6 +864,36 @@ void dense_r1_contract() {
     assert(strix_weights_destroy(w)==STRIX_SUCCESS);
     }
 }
+
+// Previous staging order: only the K5 output head plan of two rows in one block, never a two-row tile of more rows.
+unsigned dense_r1_late_contract() {
+    Environment env;
+    unsigned late=0;
+    for(unsigned bits:{4u,5u}) {
+        auto w=prepare(env,5120,64640,bits);
+        Buffer x(size_t(5120+17)*8*4),y(size_t(64640+23)*8*4);
+        for(unsigned identity:{0u,1u}) for(unsigned rows=1;rows<=8;++rows) for(unsigned tile=0;tile<=rows;++tile) {
+            auto d=dense_desc(w,rows,x.at(),y.at());
+            uint64_t bytes=0;
+            assert(strix_tp_dense_r1_workspace_bytes(env.context,&d,tile,identity,&bytes)==STRIX_SUCCESS);
+            Buffer workspace(bytes);d.workspace=workspace.at();d.workspace_bytes=bytes;
+            strix_tp_dense_plan p=nullptr;
+            assert(strix_tp_dense_plan_create_r1(env.context,&d,&env.stream,tile,identity,&p)==STRIX_SUCCESS);
+            const bool want=bits==5 && rows==2 && (tile==0 || tile==2) &&
+                strix_trellis::dense_r1_splits(5120,64640,identity!=0)==4;
+            assert(p->r1.late_stage==want);
+            if(want) {
+                assert(p->use_r1);
+                assert(strix_tp_dense_plan_submit(p)==STRIX_SUCCESS && tp_fake::r1.late_stage);
+                ++late;
+            }
+            assert(strix_tp_dense_plan_destroy(p)==STRIX_SUCCESS);
+        }
+        assert(strix_weights_destroy(w)==STRIX_SUCCESS);
+    }
+    assert(late>=2);
+    return late;
+}
 #ifdef STRIX_TP_API_NO_MAIN
 int tp_api_contract_main() {
 #else
@@ -884,6 +914,7 @@ int main() {
     }
 #endif
     dense_r1_contract();
+    const unsigned late_plans = dense_r1_late_contract();
     dense_split_contract();
     dense_positive(); dense_negative();
     {
@@ -898,6 +929,7 @@ int main() {
     }
     assert(fake::buffers.empty());
     std::cout << "TP CPU API contract passed: dense 432 tiled plans, 176 exact MoE unions, "
-                 "18 device banks through 256 experts; split3 R1..R8 and A/B/C error stops; mock HIP only.\n";
+                 "18 device banks through 256 experts; split3 R1..R8 and A/B/C error stops; " << late_plans
+              << " late-staging head plans; mock HIP only.\n";
     return 0;
 }

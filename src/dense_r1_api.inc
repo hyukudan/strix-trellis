@@ -63,6 +63,9 @@ extern "C" strix_status strix_tp_dense_plan_create_r1(strix_context c,
     a.pipelined=strix_trellis::dense_r1_pipelined(a.projection.weights.input,a.projection.weights.output,
         a.projection.weights.bits,a.projection.rows_per_block,a.splits);
     a.outputs_per_wave=schedule.outputs_per_wave;
+    a.late_stage=!a.pipelined && schedule.columns==64 && schedule.prefetch==4 && schedule.outputs_per_wave==8 &&
+        strix_trellis::dense_r1_late_staging(a.projection.weights.input,a.projection.weights.output,
+            a.projection.weights.bits,a.projection.rows,a.projection.rows_per_block,a.splits);
     const bool use_split=schedule.use_splitk04 &&
         strix_trellis::tp_split_geometry(a.projection.weights.input,a.projection.weights.output) &&
         a.splits==strix_trellis::tp_split_count(a.projection.weights.input,a.projection.weights.output);

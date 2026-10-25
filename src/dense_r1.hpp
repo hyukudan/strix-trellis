@@ -16,6 +16,7 @@ struct DenseR1Launch {
     unsigned schedule_rotation = 0; // Correctness perturbation, zero in timings.
     uint16_t* activation = nullptr; // Optional [rows,input] diagnostic, ob=0.
     bool pipelined = false; // weight batches requested ahead (same arithmetic); single plans: 64/128 cols, 16 outputs
+    bool late_stage = false; // previous activation staging order (same values); single plans, see dense_r1_late_staging
 };
 hipError_t launch_dense_r1_trusted(const DenseR1Launch&, hipStream_t);
 hipError_t query_dense_r1_resources(const DenseR1Launch&, size_t available_shared, bool* supported);

@@ -9,6 +9,7 @@
 #include "trellis_device.hpp"
 #include "packed_decoder.hpp"
 #include "hadamard.hpp"
+#include <atomic>
 #include <cstdlib>
 #include <cstring>
 
@@ -361,13 +362,41 @@ bool wmma_tiled_enabled() {
     }();
     return enabled;
 }
-bool wmma_tiled_fused_output_enabled() {
-    static const bool enabled = [] {
-        // Off by default: slower than the separate transform in some measured cells.
+int wmma_tiled_fused_mode() {
+    static const int mode = [] {
+        // Default "auto": fused only when the grid has more blocks than CUs (one-wave grids keep the separate
+        // transform). Measured over 12 process pairs on two devices: no fused cell significantly (95 %) and materially
+        // (> 1 %) slower than the separate transform, pooled or per node.
+        // "0" (or "off"/"false") restores the separate transform everywhere, "1" fuses whenever possible.
+        // Same bits in every mode.
         const char* v = std::getenv("STRIX_TRELLIS_WMMA_TILED_FUSED");
-        return v && std::strcmp(v, "1") == 0;
+        if (v && (std::strcmp(v, "0") == 0 || std::strcmp(v, "off") == 0 || std::strcmp(v, "false") == 0)) return 0;
+        if (v && std::strcmp(v, "1") == 0) return 1;
+        return 2;
     }();
-    return enabled;
+    return mode;
+}
+bool wmma_tiled_fused_output_enabled() { return wmma_tiled_fused_mode() != 0; }
+static int fused_min_blocks() {
+    // Default: more blocks than CUs (WGPs) on the current device. With one resident block per CU the fused
+    // epilogue's serial tail is exposed (fused neutral up to 20 blocks on gfx1151, faster from 24-27 up).
+    // Assumes one resident block per CU, true for the 8-wave policy tiles 0/4/6; cached per device id.
+    static const int forced = [] {
+        const char* v = std::getenv("STRIX_TRELLIS_WMMA_TILED_FUSED_MIN_BLOCKS");
+        const int x = v ? std::atoi(v) : 0;
+        return x > 0 ? x : 0;
+    }();
+    if (forced) return forced;
+    static std::atomic<int> per_device[64] = {};   // CU count + 1 per device id, 0 = not queried yet
+    int dev = 0;
+    if (hipGetDevice(&dev) != hipSuccess || dev < 0 || dev >= 64) return 32;
+    int n = per_device[dev].load(std::memory_order_relaxed);
+    if (n == 0) {
+        int cus = 0;
+        n = hipDeviceGetAttribute(&cus, hipDeviceAttributeMultiprocessorCount, dev) == hipSuccess && cus > 0 ? cus + 1 : 32;
+        per_device[dev].store(n, std::memory_order_relaxed);
+    }
+    return n;
 }
 static bool tiled_geometry_ok(const DeviceWeights& w, int rows, int splits) {
     return w.trellis && rows > 0 && splits > 0 && w.input > 0 && w.output > 0 &&
@@ -380,6 +409,16 @@ bool wmma_tiled_fuses_output(const DeviceWeights& w, int rows, int splits, int t
     if (tile < 0 || tile >= wmma_tiled::config_count) return false;
     const auto& c = wmma_tiled::configs[tile];
     return c.bn % 128 == 0 && w.output % c.bn == 0;
+}
+bool wmma_tiled_fuse_selected(const DeviceWeights& w, int rows, int splits) {
+    const int mode = wmma_tiled_fused_mode();
+    if (mode == 0) return false;
+    const int tile = wmma_tiled::policy_tile(w, rows, splits);
+    if (!wmma_tiled_fuses_output(w, rows, splits, tile)) return false;
+    if (mode == 1) return true;
+    const auto& c = wmma_tiled::configs[tile];
+    const long blocks = long((rows + c.bm - 1) / c.bm) * (w.output / c.bn) * splits;
+    return blocks >= fused_min_blocks();
 }
 #ifdef STRIX_TRELLIS_WMMA_PROBE
 hipError_t launch_wmma_tiled_probe(const DeviceWeights& w, const _Float16* input, float* partial, int rows,

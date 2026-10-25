@@ -288,8 +288,11 @@ for `N` ≥ 16,384 or not a multiple of 256), 129–1024 rows → 256×128,
 more → 128×128; the 256×128 and 128×128 tiles visit the blocks in groups
 of two row blocks per column so that activation rows are reused while hot.
 With one split the core can also apply the output transform in its
-epilogue (`STRIX_TRELLIS_WMMA_TILED_FUSED=1`, same bits); this is off by
-default, see below.
+epilogue, same bits. By default it does so only when the grid has more
+blocks than the GPU has CUs (`STRIX_TRELLIS_WMMA_TILED_FUSED=auto`): with one
+block per CU the epilogue's serial tail is exposed and fusing does not pay.
+`=0` keeps the separate output transform everywhere, `=1` fuses whenever
+possible. The tables below were measured with the separate transform.
 
 **Method:** full operator (input H128 transform, WMMA core, output
 transform) through the internal entry point that `strix_gemm` uses, so
@@ -375,13 +378,15 @@ sustained WMMA, previous core → this revision:
   previous core reached 12–38 %.
 - The fused epilogue (F) takes up to 30 % less time than the separate
   transform in most single-split cells, for example the EAQ `q_b` at every
-  M (45–53 % → 61–64 % of sustained) and shared down at M ≥ 1024. It is off
-  by default because it was slower in three cells in all three paired runs
-  (more than 0.5 % in the median): shared down K4 at M 128 (6–13 %), `q_a`
-  K4 at M 128 (2–4 %) and the `o_a` slice K4 at M 256. A likely cause, not
-  yet verified, is that these grids have few blocks, so the transform
-  inside the core runs on fewer CUs than the separate transform does. Once
-  those cells are fixed, the fused epilogue becomes the default.
+  M (45–53 % → 61–64 % of sustained) and shared down at M ≥ 1024. It was
+  slower in three cells in all three paired runs (more than 0.5 % in the
+  median): shared down K4 at M 128 (6–13 %), `q_a` K4 at M 128 (2–4 %) and
+  the `o_a` slice K4 at M 256. All of them have at most one block per CU,
+  where the epilogue's serial tail is exposed. The default (`auto`)
+  therefore fuses only when the grid has more blocks than CUs; measured
+  over 12 process pairs on two nodes, no fused cell was significantly
+  (95 %) and materially (> 1 %) slower than the separate transform, and
+  the summed time of the measured cells fell 13–14 %.
 - Rows below 128 keep the previous core. Other codebooks and bit rates keep
   it at every row count.
 

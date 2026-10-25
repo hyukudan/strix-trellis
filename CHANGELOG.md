@@ -78,6 +78,9 @@ session on the same machine.
   30 % faster in most cells, but slower than the separate transform in
   three small cells (shared down K4 M 128 by 6–13 %, `q_a` K4 M 128 by
   2–4 %, `o_a` slice K4 M 256).
+- `STRIX_TRELLIS_WMMA_TILED_FUSED=auto` (now the default; `=0` restores RC4): fused epilogue only for calls whose grid has
+  more blocks than the device has CUs (`STRIX_TRELLIS_WMMA_TILED_FUSED_MIN_BLOCKS`, default CU count + 1); the three slow cells above are 5-20-block
+  grids and keep the separate transform. Same bits as both other modes.
 - `api_linear_bench`: `STRIX_BENCH_PATH=api|plan|graph` and `STRIX_BENCH_ROWS`;
   every clone and phase must give the same output bits.
 - README: measured `gfx1151` WMMA ceiling (burst 53.9 TOPS FP16, sustained

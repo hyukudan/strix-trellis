@@ -87,6 +87,7 @@ static std::vector<unsigned char> download(const Buf& b, size_t bytes) {
     std::vector<unsigned char> h(bytes); HIP(hipMemcpy(h.data(), b.p, bytes, hipMemcpyDeviceToHost)); return h;
 }
 
+static double g_q1 = 0, g_q3 = 0;   // quartiles of the last time_us() call
 template<class F> static double time_us(F launch, int reps = 9) {
     hipEvent_t a, b; HIP(hipEventCreate(&a)); HIP(hipEventCreate(&b));
     launch(); launch(); HIP(hipDeviceSynchronize());
@@ -96,7 +97,7 @@ template<class F> static double time_us(F launch, int reps = 9) {
         float ms; HIP(hipEventElapsedTime(&ms, a, b)); t.push_back(ms * 1000);
     }
     HIP(hipEventDestroy(a)); HIP(hipEventDestroy(b));
-    std::sort(t.begin(), t.end()); return t[t.size() / 2];
+    std::sort(t.begin(), t.end()); g_q1 = t[t.size() / 4]; g_q3 = t[(3 * t.size()) / 4]; return t[t.size() / 2];
 }
 
 
@@ -293,7 +294,22 @@ static void sweep_fixture(const std::string& path, const std::vector<int>& ms, i
 // Full operator (launch_linear, prefer_wmma) as an engine calls strix_gemm. The tiled path is chosen
 // by the library policy and the STRIX_TRELLIS_WMMA_TILED / _FUSED flags of THIS process, so an A/B is
 // two processes; the output hash per cell must match across them. Cold: rotating weight copies.
+// STRIX_BENCH_REPS=<n> sets the timed repetitions per linear cell (default 11); STRIX_BENCH_ONLY=a,b keeps only
+// the cells whose name contains one of the comma-separated substrings (timing selection only; bits unchanged).
+static bool linear_selected(const std::string& name) {
+    const char* only = std::getenv("STRIX_BENCH_ONLY");
+    if (!only || !*only) return true;
+    std::string list(only), item;
+    for (size_t p = 0; p <= list.size(); ++p) {
+        if (p == list.size() || list[p] == ',') { if (!item.empty() && name.find(item) != std::string::npos) return true; item.clear(); }
+        else item += list[p];
+    }
+    return false;
+}
 static void linear_cell(const std::string& name, std::vector<std::unique_ptr<Weights>>& copies, int rows, uint32_t seed) {
+    if (!linear_selected(name)) return;
+    const char* reps_env = std::getenv("STRIX_BENCH_REPS");
+    const int reps = reps_env && std::atoi(reps_env) > 0 ? std::atoi(reps_env) : 11;
     const DeviceWeights& w = copies[0]->w;
     rng = seed;
     Buf x(size_t(rows) * w.input * 4); random_input(x, size_t(rows) * w.input);
@@ -306,11 +322,40 @@ static void linear_cell(const std::string& name, std::vector<std::unique_ptr<Wei
     HIP(hipMemcpy(y.p, old.data(), old.size(), hipMemcpyHostToDevice));
     HIP(launch_linear(w, x.as<float>(), y.as<float>(), rows, wsa, nullptr, 1.0f, 0.0f, true)); HIP(hipDeviceSynchronize());
     auto out1 = download(y, y.n);
+    // STRIX_BENCH_PAIRED=1: paired in-process A/B of the two single-split paths of the policy tile instead of the
+    // operator timing: separate (input, tiled core, output transform) vs fused (input, tiled core with epilogue),
+    // STRIX_BENCH_PAIRS alternations (default 10, order flipped every pair), each the median of `reps` launches.
+    // Records only cells where launch_linear could fuse; fused output must equal separate output bitwise.
+    if (const char* pm = std::getenv("STRIX_BENCH_PAIRED"); pm && std::strcmp(pm, "1") == 0) {
+        if (linear_split_count(w, rows) != 1 || !wmma_tiled_fuses_output(w, rows, 1)) return;
+        Pipeline p(w, rows, x.as<float>(), 1);
+        // Correctness runs start from the same old-output pattern as the API call that produced out1 (alpha 1, beta 0).
+        HIP(hipMemcpy(p.out.p, old.data(), old.size(), hipMemcpyHostToDevice));
+        p.in(); HIP(p.core_new(-1)); p.outx(); HIP(hipDeviceSynchronize()); auto sep_out = download(p.out, p.out.n);
+        HIP(hipMemcpy(p.out.p, old.data(), old.size(), hipMemcpyHostToDevice));
+        HIP(p.fused(-1)); HIP(hipDeviceSynchronize()); auto fus_out = download(p.out, p.out.n);
+        const bool equal = sep_out.size() == fus_out.size() && std::memcmp(sep_out.data(), fus_out.data(), sep_out.size()) == 0;
+        if (!equal) ++failures;
+        const char* pe = std::getenv("STRIX_BENCH_PAIRS"); const int pairs = pe && std::atoi(pe) > 0 ? std::atoi(pe) : 10;
+        std::string ss, fs;
+        for (int k = 0; k < pairs; ++k) {
+            auto sep = [&] { return time_us([&] { p.in(); HIP(p.core_new(-1)); p.outx(); }, reps); };
+            auto fus = [&] { return time_us([&] { p.in(); HIP(p.fused(-1)); }, reps); };
+            double a, b;
+            if (k % 2 == 0) { a = sep(); b = fus(); } else { b = fus(); a = sep(); }
+            char buf[64]; std::snprintf(buf, sizeof buf, "%s%.2f", k ? "," : "", a); ss += buf;
+            std::snprintf(buf, sizeof buf, "%s%.2f", k ? "," : "", b); fs += buf;
+        }
+        std::printf("{\"paired\":\"%s\",\"M\":%d,\"I\":%d,\"N\":%d,\"bits\":%d,\"reps\":%d,\"equal\":%d,\"sep_us\":[%s],\"fus_us\":[%s],\"eq_api\":%d,\"fnv_sep\":\"%016llx\",\"fnv_fus\":\"%016llx\",\"fnv_10\":\"%016llx\"}\n",
+                    name.c_str(), rows, w.input, w.output, w.bits, reps, int(equal), ss.c_str(), fs.c_str(), int(sep_out == out1), (unsigned long long)fnv(sep_out.data(), sep_out.size()), (unsigned long long)fnv(fus_out.data(), fus_out.size()), (unsigned long long)fnv(out1.data(), out1.size()));
+        std::fflush(stdout);
+        return;
+    }
     size_t turn = 0;
-    double t = time_us([&] { HIP(launch_linear(copies[turn++ % copies.size()]->w, x.as<float>(), y.as<float>(), rows, wsa, nullptr, 1.0f, 0.0f, true)); }, 11);
-    std::printf("{\"linear\":\"%s\",\"M\":%d,\"I\":%d,\"N\":%d,\"bits\":%d,\"splits\":%d,\"tiled\":%d,\"fused\":%d,\"copies\":%zu,\"us\":%.2f,\"TOPS\":%.3f,\"fnv_ab\":\"%016llx\",\"fnv_10\":\"%016llx\"}\n",
-                name.c_str(), rows, w.input, w.output, w.bits, linear_split_count(w, rows), int(wmma_tiled_enabled()), int(wmma_tiled_fused_output_enabled()),
-                copies.size(), t, 2.0 * rows * w.input * w.output / t / 1e6, (unsigned long long)fnv(out.data(), out.size()), (unsigned long long)fnv(out1.data(), out1.size()));
+    double t = time_us([&] { HIP(launch_linear(copies[turn++ % copies.size()]->w, x.as<float>(), y.as<float>(), rows, wsa, nullptr, 1.0f, 0.0f, true)); }, reps);
+    std::printf("{\"linear\":\"%s\",\"M\":%d,\"I\":%d,\"N\":%d,\"bits\":%d,\"splits\":%d,\"tiled\":%d,\"fused\":%d,\"copies\":%zu,\"us\":%.2f,\"us_q1\":%.2f,\"us_q3\":%.2f,\"reps\":%d,\"TOPS\":%.3f,\"fnv_ab\":\"%016llx\",\"fnv_10\":\"%016llx\"}\n",
+                name.c_str(), rows, w.input, w.output, w.bits, linear_split_count(w, rows), int(wmma_tiled_enabled()), wmma_tiled_fused_mode(),
+                copies.size(), t, g_q1, g_q3, reps, 2.0 * rows * w.input * w.output / t / 1e6, (unsigned long long)fnv(out.data(), out.size()), (unsigned long long)fnv(out1.data(), out1.size()));
     std::fflush(stdout);
 }
 static void linear_mode(const std::vector<int>& ms, const std::vector<std::string>& fx, bool synth) {

@@ -129,7 +129,7 @@ hipError_t launch_linear(const DeviceWeights& w,const float* input,float* output
             // With one split it can also apply the output transform in its epilogue.
             status=hipErrorNotSupported;
             if(wmma_tiled_enabled()) {
-                if(wmma_tiled_fused_output_enabled() && wmma_tiled_fuses_output(w,rows,splits)) {
+                if(wmma_tiled_fuse_selected(w,rows,splits)) {
                     WmmaFusedOutput fused_out{output,alpha,beta};
                     status=launch_wmma_tiled(w,transformed,partial,rows,splits,stream,&fused_out);
                     if(status!=hipErrorNotSupported) return status;

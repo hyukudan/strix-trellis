@@ -29,7 +29,14 @@ session on the same machine.
   shared w1 48.73 -> 46.05 µs (-5.5 %). It stays OFF because a control
   cell that does not run the changed code, `q_a` R8 on the direct API
   path, measured +0.19/+0.61/+0.88 %, which meets the pre-registered
-  regression condition; the cause is not established. Completion counters
+  regression condition; the cause is not established. A pre-registered
+  confirmation, six repetitions in two blocks, met every target against
+  both OFF arms (an OFF build and a byte-identical rebuild of it); no
+  tested cell met the registered regression condition in either candidate
+  comparison. However, two control-cell block medians differed by about
+  +0.69 % between the byte-identical OFF builds, triggering the registered
+  stability flags, so the confirmation was inconclusive and the option
+  remains OFF. Completion counters
   belong to the weights handle; plan creation zeroes them and synchronizes.
 - README: EAQ `q_a` is K6 (was labelled K5).
 - Prefill: register-blocked WMMA GEMM core, default for codebook `mul1` at

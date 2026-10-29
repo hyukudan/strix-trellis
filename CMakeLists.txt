@@ -9,7 +9,7 @@ option(STRIX_TRELLIS_DIRECT_DUAL_ISSUE "Direct-output R8 GEMV: dot products orde
 option(STRIX_TRELLIS_DIRECT_PREFETCH "Direct-output R8 GEMV: request the next K16 row before consuming the current one (same bits)" ON)
 option(STRIX_TRELLIS_GROUP_K5_PIPELINE "Grouped K5 wo_a GEMV: 128-column pipelined schedule of the K4 path (same bits)" ON)
 option(STRIX_TRELLIS_GROUP_K5_OWNER "Grouped K5 wo_a GEMV, rows 1-4: owner-fold kernel (partials folded by the CTA owning each output H128, same bits)" ON)
-option(STRIX_TRELLIS_PLAN_FUSED_COMPLETION "Prepared R1 plans of the fused-input shapes fold the output transform into the core (one launch, same bits)" OFF)
+option(STRIX_TRELLIS_PLAN_FUSED_COMPLETION "Prepared R1 plans of the fused-input shapes fold the output transform into the core (one launch, same bits)" ON)
 # Pretransformed expert pipeline (STRIX_TRELLIS_TP_MOE_PIPELINED_K2, OFF by default).
 # The defaults below are its qualified configuration, bitwise equal to the S4
 # operator (docs/experimental-k2-lean.md). ADAPTIVE_ROWS stays OFF: it is faster

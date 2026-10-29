@@ -719,7 +719,7 @@ header-only interface target. GPU programs are not registered with CTest.
 | `STRIX_TRELLIS_DIRECT_PREFETCH` | ON | Direct-output R8 GEMV: request the next K16 row before consuming the current one (same bits). |
 | `STRIX_TRELLIS_GROUP_K5_PIPELINE` | ON | Grouped K5 `wo_a` GEMV: pipelined 128-column schedule of the K4 path (same bits). OFF restores {64,2,16} where the split plan runs (it does not disable the owner-fold kernel). |
 | `STRIX_TRELLIS_GROUP_K5_OWNER` | ON | Grouped K5 `wo_a` GEMV, rows 1–4: owner-fold kernel (same bits; see [DENSE_R1.md](docs/DENSE_R1.md)). OFF keeps the split plan at every row. |
-| `STRIX_TRELLIS_PLAN_FUSED_COMPLETION` | OFF | Prepared R1 plans of the fused-input shapes fold the output transform into the core launch (same bits; see [API.md](docs/API.md)). |
+| `STRIX_TRELLIS_PLAN_FUSED_COMPLETION` | ON | Prepared R1 plans of the fused-input shapes fold the output transform into the core launch (same bits; see [API.md](docs/API.md)). |
 
 More detail: [BUILD.md](docs/BUILD.md), [GPU_TESTS.md](docs/GPU_TESTS.md).
 

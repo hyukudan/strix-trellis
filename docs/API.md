@@ -275,7 +275,8 @@ has completed and the graphs/executables have been destroyed. Destroying the
 plan only removes its explicit weight retention; it does not track graph
 ownership. Synchronizing the capture stream alone does not end graph lifetimes.
 
-With `STRIX_TRELLIS_PLAN_FUSED_COMPLETION` (build option, OFF by default), a single-row GEMV plan of a
+With `STRIX_TRELLIS_PLAN_FUSED_COMPLETION` (build option, ON by default; `-DSTRIX_TRELLIS_PLAN_FUSED_COMPLETION=OFF`
+restores the two-launch path), a single-row GEMV plan of a
 fused-input shape (for example the K6 `q_a` and K5 `o_a` projections) runs as
 one launch: the last thread block of each 128-column output group folds the
 split partials and applies the output transform, with the same arithmetic as

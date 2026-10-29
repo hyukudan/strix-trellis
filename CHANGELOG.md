@@ -8,6 +8,14 @@ session on the same machine.
 
 ## Unreleased — 2026-10-25
 
+- One-launch completion for single-row prepared plans of the fused-input
+  shapes (`STRIX_TRELLIS_PLAN_FUSED_COMPLETION`) is now ON by default.
+  End-to-end check in the two-rank DeepSeek engine, OFF and ON builds of
+  the same source, eight fresh processes in two ABBA blocks: R1 tokens, a
+  logits slice, verify windows and attention state identical on both
+  ranks; decode R1 +0.01 % (95 % interval -0.006 to +0.011 ms), R6
+  -0.16 % - not slower. `-DSTRIX_TRELLIS_PLAN_FUSED_COMPLETION=OFF`
+  restores the two-launch path.
 - Grouped K5 `wo_a` GEMV (4096 -> 1024, S16) at rows 1-4 runs the
   owner-fold kernel (partials folded by the CTA that owns each output
   H128, in ascending split order from +0: the split plan's association,

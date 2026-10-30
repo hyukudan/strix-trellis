@@ -19,8 +19,8 @@ The decode, GEMV, GEMM and transform kernels are written from scratch. See
 > against that engine's reference. The K2 expert paths are measured on the GPU
 > at operator level, bit-exact, but are not yet used in a full model. A few
 > paths are CPU-tested only. The C ABI is at version 1 and the library is at
-> 0.3.0; the current release checkpoint is **RC6** (`7a33c4b`,
-> 2026-10-25), following RC5 (`5e86cb6`) on the same date. The
+> 0.3.0; the current release checkpoint is **RC7** (`9230a97`), following
+> RC6 (`7a33c4b`) and RC5 (`5e86cb6`). The
 > [status table](#status) gives the level and the evidence for each component.
 
 ## At a glance
@@ -37,18 +37,19 @@ The decode, GEMV, GEMM and transform kernels are written from scratch. See
 | Integrate into an engine | [C ABI](#api-overview), [API contract](docs/API.md), [build guide](docs/BUILD.md) and [GPU tests](docs/GPU_TESTS.md). |
 | Reproduce benchmarks | [Measurements and commands](#measured-performance), [GPU test protocol](docs/GPU_TESTS.md). |
 
-### RC6 defaults and engine adoption
+### RC7 defaults and engine adoption
 
 | Path | Shipped policy | Measured evidence |
 |---|---|---|
 | Grouped `o_a` | Owner-fold for K4 R1–R8 and K5 R1–R4; K5 R5–R8 keep the pipelined split plan. | RC6 K5 R1: **51.27 µs**, **82.9 %** of the read ceiling; bit-identical to RC5 and independent R1 calls. [Grouped measurements](#grouped-gemv-o_a-decode-one-rank). |
 | Dense TP plans | Issue staging loads before the first FP32 rounding boundary; pipeline K4 `o_b` at R1–R4. The K5 head at R2 retains its previous staging order. | [Cold plan measurements](#dense-r1-tp-plans-decode-one-rank); each row retains its declared S4 or LEGACY identity. |
 | Direct-output R8 | Dual-issue dot order and next-row packed-weight prefetch enabled. | [Decode measurements](#decode-gemv); outputs unchanged bit for bit. |
+| Prepared-R1 completion | One launch for single-row prepared plans of the fused-input shapes (`STRIX_TRELLIS_PLAN_FUSED_COMPLETION`, on since RC7); `-DSTRIX_TRELLIS_PLAN_FUSED_COMPLETION=OFF` restores the two-launch path. | Two-rank DeepSeek engine, OFF and ON builds of the same source, eight fresh processes in two ABBA blocks: R1 tokens, a logits slice, verify windows and attention state identical on both ranks; decode R1 +0.01 % (95 % interval -0.006 to +0.011 ms), R6 -0.16 % - not slower. |
 | WMMA prefill | Register-blocked `mul1` K4–K6 core from 128 rows; fuse the output epilogue for single-split grids of at least 21 blocks on gfx1151. | Auto-fusion reduced summed operator time by **13–14 %**, with identical output bits. [Prefill measurements](#prefill-wmma-gemm). |
 
 These are operator measurements on DeepSeek V4.1 Flash tensors or synthetic
 weights of its shapes, not prompt-throughput results. Conditions and commands
-are given below. Prepared-R1 one-launch completion remains opt-in and OFF.
+are given below. Prepared-R1 one-launch completion is on by default since RC7.
 
 The [Strix Halo engine](https://github.com/hyukudan/strix-halo-engine-lab)
 uses this library for attention, shared-expert projections and the head on
@@ -171,7 +172,7 @@ model. **CPU-tested**: implemented and covered by CPU contract tests only.
 | Dual-issue order and next-row prefetch in the direct-output R8 GEMV (`STRIX_TRELLIS_DIRECT_DUAL_ISSUE`, `STRIX_TRELLIS_DIRECT_PREFETCH`) | **Measured on GPU** | Outputs bit-identical to the previous kernels in all 50 fixture/row cells; see [Decode](#decode-gemv). Not yet used in a full model. |
 | Region upload (`strix_weights_prepare_parts`) | **In use** | Weight upload path of the engine loaders. |
 | Prepared plans (`strix_linear_plan_*`) | CPU-tested | Implemented in 0.2; no separate GPU qualification yet. |
-| Dense TP rank API (`strix_tp_dense_*`), dense R1 TP plans and grouped GEMV (`strix_tp_dense_plan_create_r1`, `strix_tp_dense_pair_plan_create_r1`, `strix_grouped_gemv_plan_*`) | **In use** (build option `STRIX_TRELLIS_ENABLE_EXPERIMENTAL_TP`) | Every attention projection (`q_a`‖`kv`, `q_b`, grouped `o_a`, `o_b`) of the DeepSeek V4.1 Flash engine runs through these plans. The attention integration and the later K4 owner-fold / staging changes have full-model gates; this does not qualify every RC6 policy in the engine. See [engine adoption](#rc6-defaults-and-engine-adoption). Exact-order split-K with S4 or LEGACY identities; grouped plans match `strix_gemv` R1 bits per row. The grouped K4 `o_a` (R1–R8) and K5 `o_a` (R1–R4) run an owner-fold kernel with the same bits as the split plan (GPU: outputs identical to the split plan and to row-wise `strix_gemv` at R1–R8, dispatch checked with a kernel trace). See [DENSE_R1.md](docs/DENSE_R1.md). |
+| Dense TP rank API (`strix_tp_dense_*`), dense R1 TP plans and grouped GEMV (`strix_tp_dense_plan_create_r1`, `strix_tp_dense_pair_plan_create_r1`, `strix_grouped_gemv_plan_*`) | **In use** (build option `STRIX_TRELLIS_ENABLE_EXPERIMENTAL_TP`) | Every attention projection (`q_a`‖`kv`, `q_b`, grouped `o_a`, `o_b`) of the DeepSeek V4.1 Flash engine runs through these plans. The attention integration and the later K4 owner-fold / staging changes have full-model gates; this does not qualify every RC6 policy in the engine. See [engine adoption](#rc7-defaults-and-engine-adoption). Exact-order split-K with S4 or LEGACY identities; grouped plans match `strix_gemv` R1 bits per row. The grouped K4 `o_a` (R1–R8) and K5 `o_a` (R1–R4) run an owner-fold kernel with the same bits as the split plan (GPU: outputs identical to the split plan and to row-wise `strix_gemv` at R1–R8, dispatch checked with a kernel trace). See [DENSE_R1.md](docs/DENSE_R1.md). |
 | K2 expert split plans, lean core, pipeline (`strix_tp_moe_plan_create_split`, `STRIX_TRELLIS_TP_MOE_PIPELINED_K2`) | **Measured on GPU** (build option `STRIX_TRELLIS_ENABLE_EXPERIMENTAL_TP`) | Bitwise equal to the 0.3 expert operator on GPU fixtures (24/24 cases, K2 and K2/K3) and to a lane-exact CPU reference; the pipeline with its measured configuration is on by default and was never slower than the non-pipelined operator in any measured cell. Not yet used in a full model (the engine's routed experts use another format). See [experimental-k2-lean.md](docs/experimental-k2-lean.md). |
 | MoE TP rank API (`strix_tp_moe_*`) | Measured on GPU | Through the K2 split plans above. See [TP_RANK.md](docs/TP_RANK.md). |
 | K2 R1 local-reduction kernel | CPU-tested | Off by default (`STRIX_TRELLIS_BUILD_EXPERIMENTAL_K2_LOCAL`). See [K2_LOCAL.md](docs/K2_LOCAL.md). |
@@ -192,6 +193,8 @@ comparison.
 - **RC5 (`5e86cb6`), 2026-10-25:** `q_b`, `o_b`, shared down and
   output-head decode rows, and dense R1 plan table, alternating with RC4
   (`62e0123`) and with V16 for the decode rows. RC6 retains these kernels.
+- **RC7 (`9230a97`):** one-launch completion for single-row prepared plans of
+  the fused-input shapes on by default; no other kernel changes from RC6.
 - **RC6 (`7a33c4b`), 2026-10-25:** grouped `o_a` table, six runs in two
   blocks alternating with RC5 and a byte-identical RC5 control. K5 rows
   1–4 select the new owner-fold kernel; other grouped kernels are unchanged.
